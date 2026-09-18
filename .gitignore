@@ -31,3 +31,9 @@ build/
 
 ### VS Code ###
 .vscode/
+
+# macOS
+.DS_Store
+
+# Local test/log output
+context-test.log
