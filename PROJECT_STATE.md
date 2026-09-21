@@ -876,16 +876,16 @@ Review Review ReviewRequest ReviewResponse ReviewRepository ReviewService Review
     ↓
     Actuator / Health
     ↓
-    ========================
-    CURRENT CHECKPOINT
-    ========================
+   
     ↓
     Common Event Model
     ↓
     Kafka Producer
     ↓
     Kafka Consumers
-    ↓
+    ↓ ========================
+    CURRENT CHECKPOINT
+    ========================
     Spark / Elasticsearch
     ↓
     Analytics APIs
