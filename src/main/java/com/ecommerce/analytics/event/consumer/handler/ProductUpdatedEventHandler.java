@@ -1,21 +1,20 @@
-package com.ecommerce.analytics.analytics.event.consumer.handler;
+package com.ecommerce.analytics.event.consumer.handler;
 
 import com.ecommerce.analytics.event.EventEnvelope;
 import com.ecommerce.analytics.event.EventType;
-import com.ecommerce.analytics.event.consumer.handler.DomainEventHandler;
-import com.ecommerce.analytics.event.payload.product.ProductDeletedEvent;
+import com.ecommerce.analytics.event.payload.product.ProductUpdatedEvent;
 import com.ecommerce.analytics.service.ProductAnalyticsService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.stereotype.Component;
 
 @Component
-public class ProductDeletedEventHandler implements DomainEventHandler {
+public class ProductUpdatedEventHandler implements DomainEventHandler {
 
     private final ObjectMapper objectMapper;
     private final ProductAnalyticsService productAnalyticsService;
 
-    public ProductDeletedEventHandler(
+    public ProductUpdatedEventHandler(
             ObjectMapper objectMapper,
             ProductAnalyticsService productAnalyticsService
     ) {
@@ -25,14 +24,20 @@ public class ProductDeletedEventHandler implements DomainEventHandler {
 
     @Override
     public EventType supportedEventType() {
-        return EventType.PRODUCT_DELETED;
+        return EventType.PRODUCT_UPDATED;
     }
 
     @Override
     public void handle(EventEnvelope<JsonNode> event) {
-        ProductDeletedEvent payload =
-                objectMapper.convertValue(event.getPayload(), ProductDeletedEvent.class);
+        ProductUpdatedEvent payload =
+                objectMapper.convertValue(event.getPayload(), ProductUpdatedEvent.class);
 
-        productAnalyticsService.markDeleted(payload.getProductId(), event.getOccurredAt());
+        productAnalyticsService.upsertProduct(
+                payload.getProductId(),
+                payload.getName(),
+                payload.getCategoryId(),
+                payload.getPrice(),
+                event.getOccurredAt()
+        );
     }
 }

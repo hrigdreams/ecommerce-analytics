@@ -20,6 +20,12 @@ public class SecurityConfig {
                                 "/v3/api-docs/**"
                         ).permitAll()
 
+                        // Operational endpoints (only health/info are exposed)
+                        .requestMatchers(
+                                "/actuator/health/**",
+                                "/actuator/info"
+                        ).permitAll()
+
                         // Application endpoints
                         .requestMatchers(
                                 "/api/v1/health",
@@ -29,7 +35,8 @@ public class SecurityConfig {
                                 "/api/v1/carts/**",
                                 "/api/v1/orders/**",
                                 "/api/v1/payments/**",
-                                "/api/v1/reviews/**"
+                                "/api/v1/reviews/**",
+                                "/api/v1/analytics/**"
                         ).permitAll()
 
                         .anyRequest().authenticated()

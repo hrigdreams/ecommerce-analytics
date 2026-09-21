@@ -1,4 +1,4 @@
-package com.ecommerce.analytics.analytics.entity;
+package com.ecommerce.analytics.entity;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;

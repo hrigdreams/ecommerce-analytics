@@ -1,4 +1,4 @@
-package com.ecommerce.analytics.analytics.repository;
+package com.ecommerce.analytics.repository;
 
 import com.ecommerce.analytics.entity.ProductAnalytics;
 import org.springframework.data.jpa.repository.JpaRepository;

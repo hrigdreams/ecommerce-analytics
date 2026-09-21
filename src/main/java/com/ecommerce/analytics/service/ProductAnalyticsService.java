@@ -1,4 +1,4 @@
-package com.ecommerce.analytics.analytics.service;
+package com.ecommerce.analytics.service;
 
 import com.ecommerce.analytics.entity.ProductAnalytics;
 import com.ecommerce.analytics.repository.ProductAnalyticsRepository;
