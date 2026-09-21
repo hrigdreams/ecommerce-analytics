@@ -95,4 +95,15 @@ class DomainEventPublisherTest {
             TransactionSynchronizationManager.clear();
         }
     }
+
+    @Test
+    void shouldUseExplicitKeyWhenGiven() {
+        KafkaTemplate<String, Object> kafkaTemplate = kafkaTemplate();
+        DomainEventPublisher publisher = new DomainEventPublisher(kafkaTemplate);
+        EventEnvelope<String> event = event();
+
+        publisher.publish(event, "order-77");
+
+        verify(kafkaTemplate).send(TOPIC, "order-77", event);
+    }
 }

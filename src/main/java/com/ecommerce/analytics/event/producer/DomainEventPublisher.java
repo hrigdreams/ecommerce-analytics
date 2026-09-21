@@ -20,29 +20,32 @@ public class DomainEventPublisher {
         this.kafkaTemplate = kafkaTemplate;
     }
 
-    /**
-     * Inside a DB transaction the event is sent only AFTER the commit, so a
-     * rolled-back request never produces an event. Outside a transaction it is
-     * sent immediately.
-     */
+    /** Kafka key = aggregate id. */
     public void publish(EventEnvelope<?> event) {
+        publish(event, String.valueOf(event.getAggregateId()));
+    }
+
+    /**
+     * Same as publish(event) but with an explicit Kafka key. Events with the same key
+     * go to the same partition, so they are consumed in the order they were sent.
+     * Inside a DB transaction the event is sent only AFTER the commit.
+     */
+    public void publish(EventEnvelope<?> event, String key) {
         if (TransactionSynchronizationManager.isSynchronizationActive()) {
             TransactionSynchronizationManager.registerSynchronization(
                     new TransactionSynchronization() {
                         @Override
                         public void afterCommit() {
-                            send(event);
+                            send(event, key);
                         }
                     }
             );
         } else {
-            send(event);
+            send(event, key);
         }
     }
 
-    private void send(EventEnvelope<?> event) {
-        String key = String.valueOf(event.getAggregateId());
-
+    private void send(EventEnvelope<?> event, String key) {
         try {
             kafkaTemplate.send(KafkaTopics.DOMAIN_EVENTS, key, event)
                     .whenComplete((result, ex) -> {
@@ -52,7 +55,6 @@ public class DomainEventPublisher {
                         }
                     });
         } catch (Exception ex) {
-            // The DB commit already happened; don't fail the HTTP request.
             log.error("Failed to publish {} (event {})",
                     event.getEventType(), event.getEventId(), ex);
         }

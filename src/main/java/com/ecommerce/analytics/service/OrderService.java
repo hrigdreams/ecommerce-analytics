@@ -16,9 +16,20 @@ import com.ecommerce.analytics.repository.OrderRepository;
 import com.ecommerce.analytics.repository.ProductRepository;
 import com.ecommerce.analytics.repository.UserRepository;
 import com.ecommerce.analytics.repository.PaymentRepository;
+import com.ecommerce.analytics.event.EventEnvelope;
+import com.ecommerce.analytics.event.EventEnvelopeFactory;
+import com.ecommerce.analytics.event.EventType;
+import com.ecommerce.analytics.event.payload.order.OrderCreatedEvent;
+import com.ecommerce.analytics.event.payload.order.OrderItemEvent;
+import com.ecommerce.analytics.event.payload.order.OrderStatusChangedEvent;
+import com.ecommerce.analytics.event.producer.DomainEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.Objects;
 import java.util.List;
 import java.math.BigDecimal;
 
@@ -33,20 +44,28 @@ public class OrderService {
     private final PaymentRepository paymentRepository;
     private final UserRepository userRepository;
     private final ProductRepository productRepository;
+    private final EventEnvelopeFactory eventEnvelopeFactory;
+    private final DomainEventPublisher domainEventPublisher;
+
     public OrderService(
             OrderRepository orderRepository,
             OrderItemRepository orderItemRepository,
             PaymentRepository paymentRepository,
             UserRepository userRepository,
-            ProductRepository productRepository) {
+            ProductRepository productRepository,
+            EventEnvelopeFactory eventEnvelopeFactory,
+            DomainEventPublisher domainEventPublisher) {
 
         this.orderRepository = orderRepository;
         this.orderItemRepository = orderItemRepository;
         this.paymentRepository = paymentRepository;
         this.userRepository = userRepository;
         this.productRepository = productRepository;
+        this.eventEnvelopeFactory = eventEnvelopeFactory;
+        this.domainEventPublisher = domainEventPublisher;
     }
 
+    @Transactional
     public OrderResponse createOrder(OrderRequest request) {
 
         User user = userRepository.findById(request.getUserId())
@@ -91,6 +110,43 @@ public class OrderService {
 
         Order saved = orderRepository.save(order);
 
+        if (eventEnvelopeFactory != null && domainEventPublisher != null) {
+
+            List<OrderItemEvent> itemEvents = new ArrayList<>();
+
+            for (OrderItem item : saved.getItems()) {
+                itemEvents.add(
+                        new OrderItemEvent(
+                                item.getId(),
+                                item.getProduct().getId(),
+                                item.getProduct().getName(),
+                                item.getQuantity(),
+                                item.getUnitPrice()
+                        )
+                );
+            }
+
+            OrderCreatedEvent payload = new OrderCreatedEvent(
+                    saved.getId(),
+                    saved.getUser().getId(),
+                    saved.getStatus(),
+                    saved.getPaymentStatus(),
+                    BigDecimal.valueOf(saved.getTotalAmount()),
+                    toInstant(saved.getCreatedAt()),
+                    itemEvents
+            );
+
+            EventEnvelope<OrderCreatedEvent> event =
+                    eventEnvelopeFactory.create(
+                            EventType.ORDER_CREATED,
+                            "Order",
+                            saved.getId(),
+                            payload
+                    );
+
+            domainEventPublisher.publish(event);
+        }
+
         return mapToResponse(saved);
     }
 
@@ -119,6 +175,7 @@ public class OrderService {
         return responses;
     }
 
+    @Transactional
     public OrderResponse updateOrderStatus(Long id, String status) {
 
         Order order = orderRepository.findById(id)
@@ -128,8 +185,28 @@ public class OrderService {
                         )
                 );
 
+        String previousStatus = order.getStatus();
+
         order.setStatus(status);
         orderRepository.save(order);
+
+        if (eventEnvelopeFactory != null
+                && domainEventPublisher != null
+                && !Objects.equals(previousStatus, status)) {
+
+            OrderStatusChangedEvent payload =
+                    new OrderStatusChangedEvent(id, previousStatus, status);
+
+            EventEnvelope<OrderStatusChangedEvent> event =
+                    eventEnvelopeFactory.create(
+                            EventType.ORDER_STATUS_CHANGED,
+                            "Order",
+                            id,
+                            payload
+                    );
+
+            domainEventPublisher.publish(event);
+        }
 
         Order updated = orderRepository.findById(id)
                 .orElseThrow(() ->
@@ -166,6 +243,12 @@ public class OrderService {
 
         // Now it is safe to delete the order
         orderRepository.delete(order);
+    }
+
+    private static Instant toInstant(LocalDateTime value) {
+        return value == null
+                ? Instant.now()
+                : value.atZone(ZoneId.systemDefault()).toInstant();
     }
 
     private OrderResponse mapToResponse(Order order) {

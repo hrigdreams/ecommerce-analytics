@@ -47,6 +47,12 @@ public class ProductAnalytics {
     @Column(name = "rating_sum", nullable = false)
     private long ratingSum = 0;
 
+    @Column(name = "cart_add_count", nullable = false)
+    private long cartAddCount = 0;
+
+    @Column(name = "cart_remove_count", nullable = false)
+    private long cartRemoveCount = 0;
+
     @Column(name = "created_at")
     private Instant createdAt;
 
@@ -89,6 +95,12 @@ public class ProductAnalytics {
 
     public long getRatingSum() { return ratingSum; }
     public void setRatingSum(long ratingSum) { this.ratingSum = ratingSum; }
+
+    public long getCartAddCount() { return cartAddCount; }
+    public void setCartAddCount(long cartAddCount) { this.cartAddCount = cartAddCount; }
+
+    public long getCartRemoveCount() { return cartRemoveCount; }
+    public void setCartRemoveCount(long cartRemoveCount) { this.cartRemoveCount = cartRemoveCount; }
 
     public Instant getCreatedAt() { return createdAt; }
     public void setCreatedAt(Instant createdAt) { this.createdAt = createdAt; }

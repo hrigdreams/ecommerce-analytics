@@ -8,6 +8,11 @@ import com.ecommerce.analytics.entity.Cart;
 import com.ecommerce.analytics.entity.CartItem;
 import com.ecommerce.analytics.entity.Product;
 import com.ecommerce.analytics.entity.User;
+import com.ecommerce.analytics.event.EventEnvelope;
+import com.ecommerce.analytics.event.EventEnvelopeFactory;
+import com.ecommerce.analytics.event.EventType;
+import com.ecommerce.analytics.event.payload.cart.CartItemAddedEvent;
+import com.ecommerce.analytics.event.producer.DomainEventPublisher;
 import com.ecommerce.analytics.exception.CartNotFoundException;
 import com.ecommerce.analytics.exception.ProductNotFoundException;
 import com.ecommerce.analytics.exception.UserNotFoundException;
@@ -22,12 +27,15 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
+@SuppressWarnings({"rawtypes", "unchecked"})
 class CartServiceTest {
 
     @Mock
@@ -41,6 +49,27 @@ class CartServiceTest {
 
     @Mock
     private ProductRepository productRepository;
+
+    @Mock
+    private EventEnvelopeFactory eventEnvelopeFactory;
+
+    @Mock
+    private DomainEventPublisher domainEventPublisher;
+
+    @Mock
+    private EventEnvelope<CartItemAddedEvent> cartItemAddedEvent;
+
+    /*
+     * Raw EventEnvelope is intentional here.
+     *
+     * EventEnvelopeFactory.create(...) is resolved by Mockito
+     * as EventEnvelope<Map>, while CartService creates
+     * EventEnvelope<Map<String, Object>>.
+     *
+     * Using a raw mock avoids the generic mismatch in the test.
+     */
+    @Mock
+    private EventEnvelope cartEvent;
 
     @Mock
     private User user;
@@ -57,6 +86,9 @@ class CartServiceTest {
     @InjectMocks
     private CartService cartService;
 
+    // =========================================================
+    // CREATE CART
+    // =========================================================
 
     @Test
     void createCart_shouldCreateCartSuccessfully() {
@@ -81,6 +113,13 @@ class CartServiceTest {
         when(user.getId())
                 .thenReturn(1L);
 
+        when(eventEnvelopeFactory.create(
+                eq(EventType.CART_CREATED),
+                eq("CART"),
+                eq(1L),
+                any(Map.class)
+        )).thenReturn(cartEvent);
+
         CartResponse response =
                 cartService.createCart(request);
 
@@ -91,11 +130,19 @@ class CartServiceTest {
         verify(userRepository).findById(1L);
         verify(cartRepository).findByUserId(1L);
         verify(cartRepository).save(any(Cart.class));
+
+        verify(eventEnvelopeFactory).create(
+                eq(EventType.CART_CREATED),
+                eq("CART"),
+                eq(1L),
+                any(Map.class)
+        );
+
+        verify(domainEventPublisher).publish(cartEvent);
     }
 
-
     @Test
-    void createCart_shouldReturnExistingCartWhenUserAlreadyHasCart() {
+    void createCart_shouldReturnExistingCartWithoutCreatingEvent() {
 
         CartRequest request = new CartRequest(1L);
 
@@ -127,8 +174,16 @@ class CartServiceTest {
         verify(userRepository).findById(1L);
         verify(cartRepository).findByUserId(1L);
         verify(cartRepository).save(cart);
-    }
 
+        verify(eventEnvelopeFactory, never()).create(
+                eq(EventType.CART_CREATED),
+                anyString(),
+                anyLong(),
+                any()
+        );
+
+        verify(domainEventPublisher, never()).publish(any());
+    }
 
     @Test
     void createCart_shouldThrowUserNotFoundException() {
@@ -152,8 +207,12 @@ class CartServiceTest {
         verify(userRepository).findById(999L);
         verify(cartRepository, never()).findByUserId(anyLong());
         verify(cartRepository, never()).save(any(Cart.class));
+        verify(domainEventPublisher, never()).publish(any());
     }
 
+    // =========================================================
+    // GET CART
+    // =========================================================
 
     @Test
     void getCartById_shouldReturnCartSuccessfully() {
@@ -180,7 +239,6 @@ class CartServiceTest {
         verify(cartRepository).findById(1L);
     }
 
-
     @Test
     void getCartById_shouldThrowCartNotFoundException() {
 
@@ -201,6 +259,9 @@ class CartServiceTest {
         verify(cartRepository).findById(999L);
     }
 
+    // =========================================================
+    // GET ALL CARTS
+    // =========================================================
 
     @Test
     void getAllCarts_shouldReturnAllCarts() {
@@ -211,23 +272,13 @@ class CartServiceTest {
         User user1 = mock(User.class);
         User user2 = mock(User.class);
 
-        when(cart1.getId())
-                .thenReturn(1L);
+        when(cart1.getId()).thenReturn(1L);
+        when(cart1.getUser()).thenReturn(user1);
+        when(user1.getId()).thenReturn(1L);
 
-        when(cart1.getUser())
-                .thenReturn(user1);
-
-        when(user1.getId())
-                .thenReturn(1L);
-
-        when(cart2.getId())
-                .thenReturn(2L);
-
-        when(cart2.getUser())
-                .thenReturn(user2);
-
-        when(user2.getId())
-                .thenReturn(2L);
+        when(cart2.getId()).thenReturn(2L);
+        when(cart2.getUser()).thenReturn(user2);
+        when(user2.getId()).thenReturn(2L);
 
         when(cartRepository.findAll())
                 .thenReturn(List.of(cart1, cart2));
@@ -247,6 +298,9 @@ class CartServiceTest {
         verify(cartRepository).findAll();
     }
 
+    // =========================================================
+    // UPDATE CART
+    // =========================================================
 
     @Test
     void updateCart_shouldUpdateCartSuccessfully() {
@@ -273,6 +327,13 @@ class CartServiceTest {
         when(newUser.getId())
                 .thenReturn(2L);
 
+        when(eventEnvelopeFactory.create(
+                eq(EventType.CART_UPDATED),
+                eq("CART"),
+                eq(1L),
+                any(Map.class)
+        )).thenReturn(cartEvent);
+
         CartResponse response =
                 cartService.updateCart(1L, request);
 
@@ -284,8 +345,16 @@ class CartServiceTest {
         verify(userRepository).findById(2L);
         verify(cart).setUser(newUser);
         verify(cartRepository).save(cart);
-    }
 
+        verify(eventEnvelopeFactory).create(
+                eq(EventType.CART_UPDATED),
+                eq("CART"),
+                eq(1L),
+                any(Map.class)
+        );
+
+        verify(domainEventPublisher).publish(cartEvent);
+    }
 
     @Test
     void updateCart_shouldThrowCartNotFoundException() {
@@ -309,8 +378,8 @@ class CartServiceTest {
         verify(cartRepository).findById(999L);
         verify(userRepository, never()).findById(anyLong());
         verify(cartRepository, never()).save(any(Cart.class));
+        verify(domainEventPublisher, never()).publish(any());
     }
-
 
     @Test
     void updateCart_shouldThrowUserNotFoundException() {
@@ -338,8 +407,12 @@ class CartServiceTest {
         verify(userRepository).findById(999L);
         verify(cart, never()).setUser(any(User.class));
         verify(cartRepository, never()).save(any(Cart.class));
+        verify(domainEventPublisher, never()).publish(any());
     }
 
+    // =========================================================
+    // DELETE CART
+    // =========================================================
 
     @Test
     void deleteCart_shouldDeleteCartSuccessfully() {
@@ -347,12 +420,27 @@ class CartServiceTest {
         when(cartRepository.findById(1L))
                 .thenReturn(Optional.of(cart));
 
+        when(eventEnvelopeFactory.create(
+                eq(EventType.CART_DELETED),
+                eq("CART"),
+                eq(1L),
+                any(Map.class)
+        )).thenReturn(cartEvent);
+
         cartService.deleteCart(1L);
 
         verify(cartRepository).findById(1L);
         verify(cartRepository).delete(cart);
-    }
 
+        verify(eventEnvelopeFactory).create(
+                eq(EventType.CART_DELETED),
+                eq("CART"),
+                eq(1L),
+                any(Map.class)
+        );
+
+        verify(domainEventPublisher).publish(cartEvent);
+    }
 
     @Test
     void deleteCart_shouldThrowCartNotFoundException() {
@@ -373,8 +461,12 @@ class CartServiceTest {
 
         verify(cartRepository).findById(999L);
         verify(cartRepository, never()).delete(any(Cart.class));
+        verify(domainEventPublisher, never()).publish(any());
     }
 
+    // =========================================================
+    // ADD CART ITEM
+    // =========================================================
 
     @Test
     void addItemToCart_shouldAddItemSuccessfully() {
@@ -406,11 +498,24 @@ class CartServiceTest {
         when(cart.getId())
                 .thenReturn(1L);
 
+        when(cart.getUser())
+                .thenReturn(user);
+
+        when(user.getId())
+                .thenReturn(1L);
+
         when(product.getId())
                 .thenReturn(10L);
 
         when(product.getName())
                 .thenReturn("Laptop");
+
+        when(eventEnvelopeFactory.create(
+                eq(EventType.CART_ITEM_ADDED),
+                eq("CART"),
+                eq(1L),
+                any(CartItemAddedEvent.class)
+        )).thenReturn(cartItemAddedEvent);
 
         CartItemResponse response =
                 cartService.addItemToCart(1L, request);
@@ -425,8 +530,16 @@ class CartServiceTest {
         verify(cartRepository).findById(1L);
         verify(productRepository).findById(10L);
         verify(cartItemRepository).save(any(CartItem.class));
-    }
 
+        verify(eventEnvelopeFactory).create(
+                eq(EventType.CART_ITEM_ADDED),
+                eq("CART"),
+                eq(1L),
+                any(CartItemAddedEvent.class)
+        );
+
+        verify(domainEventPublisher).publish(cartItemAddedEvent);
+    }
 
     @Test
     void addItemToCart_shouldThrowCartNotFoundException() {
@@ -451,8 +564,8 @@ class CartServiceTest {
         verify(cartRepository).findById(999L);
         verify(productRepository, never()).findById(anyLong());
         verify(cartItemRepository, never()).save(any(CartItem.class));
+        verify(domainEventPublisher, never()).publish(any());
     }
-
 
     @Test
     void addItemToCart_shouldThrowProductNotFoundException() {
@@ -480,8 +593,12 @@ class CartServiceTest {
         verify(cartRepository).findById(1L);
         verify(productRepository).findById(999L);
         verify(cartItemRepository, never()).save(any(CartItem.class));
+        verify(domainEventPublisher, never()).publish(any());
     }
 
+    // =========================================================
+    // UPDATE CART ITEM
+    // =========================================================
 
     @Test
     void updateCartItem_shouldUpdateItemSuccessfully() {
@@ -503,6 +620,9 @@ class CartServiceTest {
         when(cartItemRepository.save(cartItem))
                 .thenReturn(cartItem);
 
+        when(cart.getId())
+                .thenReturn(1L);
+
         when(cartItem.getId())
                 .thenReturn(100L);
 
@@ -515,14 +635,18 @@ class CartServiceTest {
         when(cartItem.getQuantity())
                 .thenReturn(5);
 
-        when(cart.getId())
-                .thenReturn(1L);
-
         when(newProduct.getId())
                 .thenReturn(20L);
 
         when(newProduct.getName())
                 .thenReturn("Phone");
+
+        when(eventEnvelopeFactory.create(
+                eq(EventType.CART_ITEM_UPDATED),
+                eq("CART"),
+                eq(1L),
+                any(Map.class)
+        )).thenReturn(cartEvent);
 
         CartItemResponse response =
                 cartService.updateCartItem(
@@ -547,8 +671,16 @@ class CartServiceTest {
         verify(cartItem).setQuantity(5);
 
         verify(cartItemRepository).save(cartItem);
-    }
 
+        verify(eventEnvelopeFactory).create(
+                eq(EventType.CART_ITEM_UPDATED),
+                eq("CART"),
+                eq(1L),
+                any(Map.class)
+        );
+
+        verify(domainEventPublisher).publish(cartEvent);
+    }
 
     @Test
     void updateCartItem_shouldThrowCartNotFoundExceptionWhenCartDoesNotExist() {
@@ -578,8 +710,8 @@ class CartServiceTest {
         verify(cartItemRepository, never())
                 .findByIdAndCartId(anyLong(), anyLong());
         verify(productRepository, never()).findById(anyLong());
+        verify(domainEventPublisher, never()).publish(any());
     }
-
 
     @Test
     void updateCartItem_shouldThrowCartNotFoundExceptionWhenItemDoesNotExist() {
@@ -614,8 +746,8 @@ class CartServiceTest {
 
         verify(productRepository, never()).findById(anyLong());
         verify(cartItemRepository, never()).save(any(CartItem.class));
+        verify(domainEventPublisher, never()).publish(any());
     }
-
 
     @Test
     void updateCartItem_shouldThrowProductNotFoundException() {
@@ -655,8 +787,12 @@ class CartServiceTest {
         verify(cartItem, never()).setProduct(any(Product.class));
         verify(cartItem, never()).setQuantity(anyInt());
         verify(cartItemRepository, never()).save(any(CartItem.class));
+        verify(domainEventPublisher, never()).publish(any());
     }
 
+    // =========================================================
+    // DELETE CART ITEM
+    // =========================================================
 
     @Test
     void deleteCartItem_shouldDeleteItemSuccessfully() {
@@ -667,14 +803,35 @@ class CartServiceTest {
         when(cartItemRepository.findByIdAndCartId(100L, 1L))
                 .thenReturn(Optional.of(cartItem));
 
+        when(cart.getId())
+                .thenReturn(1L);
+
+        when(cartItem.getId())
+                .thenReturn(100L);
+
+        when(eventEnvelopeFactory.create(
+                eq(EventType.CART_ITEM_REMOVED),
+                eq("CART"),
+                eq(1L),
+                any(Map.class)
+        )).thenReturn(cartEvent);
+
         cartService.deleteCartItem(1L, 100L);
 
         verify(cartRepository).findById(1L);
         verify(cartItemRepository)
                 .findByIdAndCartId(100L, 1L);
         verify(cartItemRepository).delete(cartItem);
-    }
 
+        verify(eventEnvelopeFactory).create(
+                eq(EventType.CART_ITEM_REMOVED),
+                eq("CART"),
+                eq(1L),
+                any(Map.class)
+        );
+
+        verify(domainEventPublisher).publish(cartEvent);
+    }
 
     @Test
     void deleteCartItem_shouldThrowCartNotFoundExceptionWhenCartDoesNotExist() {
@@ -698,8 +855,8 @@ class CartServiceTest {
                 .findByIdAndCartId(anyLong(), anyLong());
         verify(cartItemRepository, never())
                 .delete(any(CartItem.class));
+        verify(domainEventPublisher, never()).publish(any());
     }
-
 
     @Test
     void deleteCartItem_shouldThrowCartNotFoundExceptionWhenItemDoesNotExist() {
@@ -726,5 +883,6 @@ class CartServiceTest {
                 .findByIdAndCartId(999L, 1L);
         verify(cartItemRepository, never())
                 .delete(any(CartItem.class));
+        verify(domainEventPublisher, never()).publish(any());
     }
 }

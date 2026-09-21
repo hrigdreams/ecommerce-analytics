@@ -8,9 +8,17 @@ import com.ecommerce.analytics.exception.OrderNotFoundException;
 import com.ecommerce.analytics.exception.PaymentNotFoundException;
 import com.ecommerce.analytics.repository.OrderRepository;
 import com.ecommerce.analytics.repository.PaymentRepository;
+import com.ecommerce.analytics.event.EventEnvelope;
+import com.ecommerce.analytics.event.EventEnvelopeFactory;
+import com.ecommerce.analytics.event.EventType;
+import com.ecommerce.analytics.event.payload.payment.PaymentCreatedEvent;
+import com.ecommerce.analytics.event.producer.DomainEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.util.List;
 
 @Service
@@ -18,13 +26,19 @@ public class PaymentService {
 
     private final PaymentRepository paymentRepository;
     private final OrderRepository orderRepository;
+    private final EventEnvelopeFactory eventEnvelopeFactory;
+    private final DomainEventPublisher domainEventPublisher;
 
     public PaymentService(
             PaymentRepository paymentRepository,
-            OrderRepository orderRepository
+            OrderRepository orderRepository,
+            EventEnvelopeFactory eventEnvelopeFactory,
+            DomainEventPublisher domainEventPublisher
     ) {
         this.paymentRepository = paymentRepository;
         this.orderRepository = orderRepository;
+        this.eventEnvelopeFactory = eventEnvelopeFactory;
+        this.domainEventPublisher = domainEventPublisher;
     }
 
     @Transactional
@@ -70,6 +84,31 @@ public class PaymentService {
 
         orderRepository.save(order);
 
+        if (eventEnvelopeFactory != null && domainEventPublisher != null) {
+
+            PaymentCreatedEvent payload = new PaymentCreatedEvent(
+                    saved.getId(),
+                    order.getId(),
+                    saved.getPaymentMethod(),
+                    saved.getStatus(),
+                    saved.getAmount(),
+                    saved.getTransactionId(),
+                    toInstant(saved.getCreatedAt())
+            );
+
+            EventEnvelope<PaymentCreatedEvent> event =
+                    eventEnvelopeFactory.create(
+                            EventType.PAYMENT_CREATED,
+                            "Payment",
+                            saved.getId(),
+                            payload
+                    );
+
+            // Key by ORDER id so ORDER_CREATED, ORDER_STATUS_CHANGED and
+            // PAYMENT_CREATED for one order land on the same partition (in order).
+            domainEventPublisher.publish(event, String.valueOf(order.getId()));
+        }
+
         return mapToResponse(saved);
     }
 
@@ -110,6 +149,12 @@ public class PaymentService {
         order.setPaymentStatus("UNPAID");
 
         orderRepository.save(order);
+    }
+
+    private static Instant toInstant(LocalDateTime value) {
+        return value == null
+                ? Instant.now()
+                : value.atZone(ZoneId.systemDefault()).toInstant();
     }
 
     private PaymentResponse mapToResponse(Payment payment) {
