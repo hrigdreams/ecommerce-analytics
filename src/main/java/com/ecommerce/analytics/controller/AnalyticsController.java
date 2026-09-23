@@ -1,14 +1,16 @@
 package com.ecommerce.analytics.controller;
 
+import com.ecommerce.analytics.config.CacheConfig;
+import com.ecommerce.analytics.dto.analytics.CartAnalyticsResponse;
+import com.ecommerce.analytics.dto.analytics.CartItemAnalyticsResponse;
+import com.ecommerce.analytics.dto.analytics.CategoryAnalyticsResponse;
+import com.ecommerce.analytics.dto.analytics.CustomerAnalyticsResponse;
+import com.ecommerce.analytics.dto.analytics.GeoAnalyticsResponse;
+import com.ecommerce.analytics.dto.analytics.OrderAnalyticsResponse;
+import com.ecommerce.analytics.dto.analytics.OrderItemAnalyticsResponse;
+import com.ecommerce.analytics.dto.analytics.ProductAnalyticsResponse;
+import com.ecommerce.analytics.dto.analytics.TimeAnalyticsResponse;
 import com.ecommerce.analytics.entity.CartAnalytics;
-import com.ecommerce.analytics.entity.CartItemAnalytics;
-import com.ecommerce.analytics.entity.CategoryAnalytics;
-import com.ecommerce.analytics.entity.CustomerAnalytics;
-import com.ecommerce.analytics.entity.GeoAnalytics;
-import com.ecommerce.analytics.entity.OrderAnalytics;
-import com.ecommerce.analytics.entity.OrderItemAnalytics;
-import com.ecommerce.analytics.entity.ProductAnalytics;
-import com.ecommerce.analytics.entity.TimeAnalytics;
 import com.ecommerce.analytics.repository.CartAnalyticsRepository;
 import com.ecommerce.analytics.repository.CartItemAnalyticsRepository;
 import com.ecommerce.analytics.repository.CategoryAnalyticsRepository;
@@ -21,6 +23,10 @@ import com.ecommerce.analytics.repository.TimeAnalyticsRepository;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import org.springframework.cache.annotation.Cacheable;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -37,9 +43,9 @@ import java.util.Map;
 
 /**
  * Read-only endpoints over the analytics read models built by the Kafka
- * consumer pipeline (OrderAnalyticsService, ProductAnalyticsService,
- * CartAnalyticsService, ReviewAnalyticsService, CustomerAnalyticsService,
- * CategoryAnalyticsService, TimeAnalyticsService, GeoAnalyticsService).
+ * consumer pipeline. Every response here is a DTO (record), never a JPA
+ * entity directly, so the entity's internal shape (columns, indexes, JPA
+ * annotations) can change without breaking API consumers.
  *
  * These are all populated asynchronously from domain events, so results
  * reflect the latest event the consumer has processed, not necessarily the
@@ -91,15 +97,18 @@ public class AnalyticsController {
 
     @Operation(summary = "Get order analytics", description = "Read-model row for a single order (status, payment, total, paid flag).")
     @GetMapping("/orders/{orderId}")
-    public OrderAnalytics getOrderAnalytics(@PathVariable Long orderId) {
+    public OrderAnalyticsResponse getOrderAnalytics(@PathVariable Long orderId) {
         return orderAnalyticsRepository.findById(orderId)
+                .map(OrderAnalyticsResponse::from)
                 .orElseThrow(() -> notFound("Order analytics not found for order " + orderId));
     }
 
     @Operation(summary = "Get order line items", description = "Line items recorded for a single order.")
     @GetMapping("/orders/{orderId}/items")
-    public List<OrderItemAnalytics> getOrderItems(@PathVariable Long orderId) {
-        return orderItemAnalyticsRepository.findByOrderId(orderId);
+    public List<OrderItemAnalyticsResponse> getOrderItems(@PathVariable Long orderId) {
+        return orderItemAnalyticsRepository.findByOrderId(orderId).stream()
+                .map(OrderItemAnalyticsResponse::from)
+                .toList();
     }
 
     // ------------------------------------------------------------------
@@ -108,15 +117,23 @@ public class AnalyticsController {
 
     @Operation(summary = "Get product analytics", description = "Views, units sold, revenue, cart frequency, and rating for a product.")
     @GetMapping("/products/{productId}")
-    public ProductAnalytics getProductAnalytics(@PathVariable Long productId) {
+    public ProductAnalyticsResponse getProductAnalytics(@PathVariable Long productId) {
         return productAnalyticsRepository.findById(productId)
+                .map(ProductAnalyticsResponse::from)
                 .orElseThrow(() -> notFound("Product analytics not found for product " + productId));
     }
 
-    @Operation(summary = "List product analytics", description = "All product analytics rows.")
+    @Operation(
+            summary = "List product analytics (paginated)",
+            description = "Product analytics rows, newest-updated first by default. Use page/size to page through them."
+    )
     @GetMapping("/products")
-    public List<ProductAnalytics> getAllProductAnalytics() {
-        return productAnalyticsRepository.findAll();
+    public Page<ProductAnalyticsResponse> getAllProductAnalytics(
+            @Parameter(description = "Zero-based page index") @RequestParam(defaultValue = "0") int page,
+            @Parameter(description = "Page size (max 100)") @RequestParam(defaultValue = "20") int size
+    ) {
+        Pageable pageable = boundedPageRequest(page, size, "updatedAt");
+        return productAnalyticsRepository.findAll(pageable).map(ProductAnalyticsResponse::from);
     }
 
     // ------------------------------------------------------------------
@@ -125,15 +142,18 @@ public class AnalyticsController {
 
     @Operation(summary = "Get cart analytics", description = "Item count / active status for a single cart.")
     @GetMapping("/carts/{cartId}")
-    public CartAnalytics getCartAnalytics(@PathVariable Long cartId) {
+    public CartAnalyticsResponse getCartAnalytics(@PathVariable Long cartId) {
         return cartAnalyticsRepository.findById(cartId)
+                .map(CartAnalyticsResponse::from)
                 .orElseThrow(() -> notFound("Cart analytics not found for cart " + cartId));
     }
 
     @Operation(summary = "Get cart items", description = "All items (active and removed) ever added to a cart.")
     @GetMapping("/carts/{cartId}/items")
-    public List<CartItemAnalytics> getCartItems(@PathVariable Long cartId) {
-        return cartItemAnalyticsRepository.findByCartId(cartId);
+    public List<CartItemAnalyticsResponse> getCartItems(@PathVariable Long cartId) {
+        return cartItemAnalyticsRepository.findByCartId(cartId).stream()
+                .map(CartItemAnalyticsResponse::from)
+                .toList();
     }
 
     @Operation(
@@ -141,12 +161,13 @@ public class AnalyticsController {
             description = "Active carts with items whose last activity is older than the given number of minutes (default 60)."
     )
     @GetMapping("/carts/abandoned")
-    public List<CartAnalytics> getAbandonedCarts(
+    public List<CartAnalyticsResponse> getAbandonedCarts(
             @Parameter(description = "Minutes of inactivity before a cart counts as abandoned", example = "60")
             @RequestParam(name = "staleMinutes", defaultValue = "60") long staleMinutes
     ) {
         Instant staleBefore = Instant.now().minus(staleMinutes, ChronoUnit.MINUTES);
-        return cartAnalyticsRepository.findAbandoned(staleBefore);
+        List<CartAnalytics> abandoned = cartAnalyticsRepository.findAbandoned(staleBefore);
+        return abandoned.stream().map(CartAnalyticsResponse::from).toList();
     }
 
     // ------------------------------------------------------------------
@@ -155,16 +176,24 @@ public class AnalyticsController {
 
     @Operation(summary = "Get customer analytics", description = "Order counts, total spend, and average order value for one customer.")
     @GetMapping("/customers/{userId}")
-    public CustomerAnalytics getCustomerAnalytics(@PathVariable Long userId) {
+    public CustomerAnalyticsResponse getCustomerAnalytics(@PathVariable Long userId) {
         return customerAnalyticsRepository.findById(userId)
+                .map(CustomerAnalyticsResponse::from)
                 .orElseThrow(() -> notFound("Customer analytics not found for user " + userId));
     }
 
+    /**
+     * Cached for 30s: this does 3 full-table-ish aggregate queries, and the
+     * underlying counts only change as the Kafka consumer processes events,
+     * so re-running it on every dashboard poll is wasted work. Cache key is
+     * the (from, to) pair, so different date ranges get separate entries.
+     */
     @Operation(
             summary = "Customer summary",
-            description = "Total customers, customers with at least one paid order (returning-capable), and new customers whose first order fell in [from, to)."
+            description = "Total customers, customers with at least one paid order (returning-capable), and new customers whose first order fell in [from, to). Cached for 30 seconds."
     )
     @GetMapping("/customers/summary")
+    @Cacheable(cacheNames = CacheConfig.CUSTOMER_SUMMARY_CACHE, key = "#from + '_' + #to")
     public Map<String, Object> getCustomerSummary(
             @Parameter(description = "ISO-8601 instant, inclusive. Defaults to 30 days ago.")
             @RequestParam(required = false) Instant from,
@@ -189,35 +218,46 @@ public class AnalyticsController {
 
     @Operation(summary = "Get category analytics", description = "Product count, units sold, revenue, and average rating for a category.")
     @GetMapping("/categories/{categoryId}")
-    public CategoryAnalytics getCategoryAnalytics(@PathVariable Long categoryId) {
+    public CategoryAnalyticsResponse getCategoryAnalytics(@PathVariable Long categoryId) {
         return categoryAnalyticsRepository.findById(categoryId)
+                .map(CategoryAnalyticsResponse::from)
                 .orElseThrow(() -> notFound("Category analytics not found for category " + categoryId));
     }
 
-    @Operation(summary = "List category analytics", description = "All category analytics rows.")
+    @Operation(
+            summary = "List category analytics (paginated)",
+            description = "Category analytics rows. Use page/size to page through them."
+    )
     @GetMapping("/categories")
-    public List<CategoryAnalytics> getAllCategoryAnalytics() {
-        return categoryAnalyticsRepository.findAll();
+    public Page<CategoryAnalyticsResponse> getAllCategoryAnalytics(
+            @Parameter(description = "Zero-based page index") @RequestParam(defaultValue = "0") int page,
+            @Parameter(description = "Page size (max 100)") @RequestParam(defaultValue = "20") int size
+    ) {
+        Pageable pageable = boundedPageRequest(page, size, "updatedAt");
+        return categoryAnalyticsRepository.findAll(pageable).map(CategoryAnalyticsResponse::from);
     }
 
     // ------------------------------------------------------------------
     // Time
     // ------------------------------------------------------------------
 
+    /** Cached for 30s per (bucket, limit) key — same reasoning as the customer summary. */
     @Operation(
             summary = "Time-bucketed order/revenue rollups",
-            description = "Orders, paid orders, revenue, units sold, and average order value bucketed by HOUR, DAY, WEEK, MONTH, or YEAR."
+            description = "Orders, paid orders, revenue, units sold, and average order value bucketed by HOUR, DAY, WEEK, MONTH, or YEAR. Cached for 30 seconds."
     )
     @GetMapping("/time")
-    public List<TimeAnalytics> getTimeAnalytics(
+    @Cacheable(cacheNames = CacheConfig.TIME_ANALYTICS_CACHE, key = "#bucket + '_' + #limit")
+    public List<TimeAnalyticsResponse> getTimeAnalytics(
             @Parameter(description = "HOUR, DAY, WEEK, MONTH, or YEAR", example = "DAY")
             @RequestParam(defaultValue = "DAY") String bucket,
             @Parameter(description = "Max number of buckets to return, most recent first")
             @RequestParam(defaultValue = "30") int limit
     ) {
         String bucketType = bucket.toUpperCase();
-        List<TimeAnalytics> rows = timeAnalyticsRepository.findByBucketTypeOrderByBucketStartDesc(bucketType);
-        return rows.size() > limit ? rows.subList(0, limit) : rows;
+        var rows = timeAnalyticsRepository.findByBucketTypeOrderByBucketStartDesc(bucketType);
+        var bounded = rows.size() > limit ? rows.subList(0, limit) : rows;
+        return bounded.stream().map(TimeAnalyticsResponse::from).toList();
     }
 
     // ------------------------------------------------------------------
@@ -226,11 +266,20 @@ public class AnalyticsController {
 
     @Operation(summary = "Geography rollups", description = "Orders, paid orders, and revenue by country/city.")
     @GetMapping("/geography")
-    public List<GeoAnalytics> getGeoAnalytics() {
-        return geoAnalyticsRepository.findAll();
+    public List<GeoAnalyticsResponse> getGeoAnalytics() {
+        return geoAnalyticsRepository.findAll().stream().map(GeoAnalyticsResponse::from).toList();
     }
+
+    // ------------------------------------------------------------------
 
     private ResponseStatusException notFound(String message) {
         return new ResponseStatusException(HttpStatus.NOT_FOUND, message);
+    }
+
+    /** Caps page size so nobody can request size=1000000 and blow up the DB/response. */
+    private Pageable boundedPageRequest(int page, int size, String sortBy) {
+        int safePage = Math.max(page, 0);
+        int safeSize = Math.min(Math.max(size, 1), 100);
+        return PageRequest.of(safePage, safeSize, org.springframework.data.domain.Sort.by(sortBy).descending());
     }
 }

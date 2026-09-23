@@ -37,3 +37,7 @@ build/
 
 # Local test/log output
 context-test.log
+
+HELP.md
+
+dependency-reduced-pom.xml

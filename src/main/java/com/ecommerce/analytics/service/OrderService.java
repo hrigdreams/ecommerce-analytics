@@ -22,6 +22,7 @@ import com.ecommerce.analytics.event.EventType;
 import com.ecommerce.analytics.event.payload.order.OrderCreatedEvent;
 import com.ecommerce.analytics.event.payload.order.OrderItemEvent;
 import com.ecommerce.analytics.event.payload.order.OrderStatusChangedEvent;
+import com.ecommerce.analytics.event.payload.funnel.CheckoutStartedEvent;
 import com.ecommerce.analytics.event.producer.DomainEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -67,6 +68,25 @@ public class OrderService {
 
     @Transactional
     public OrderResponse createOrder(OrderRequest request) {
+
+        if (eventEnvelopeFactory != null && domainEventPublisher != null) {
+            int itemCount = request.getItems() != null ? request.getItems().size() : 0;
+
+            CheckoutStartedEvent checkoutPayload =
+                    new CheckoutStartedEvent(request.getUserId(), itemCount);
+
+            EventEnvelope<CheckoutStartedEvent> checkoutEvent =
+                    eventEnvelopeFactory.create(
+                            EventType.CHECKOUT_STARTED,
+                            "User",
+                            request.getUserId(),
+                            checkoutPayload
+                    );
+
+            // publishNow: sent immediately, ignoring the surrounding @Transactional,
+            // so a checkout that later fails validation still counts as a funnel start.
+            domainEventPublisher.publishNow(checkoutEvent);
+        }
 
         User user = userRepository.findById(request.getUserId())
                 .orElseThrow(() ->

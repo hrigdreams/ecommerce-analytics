@@ -17,6 +17,9 @@ import com.ecommerce.analytics.repository.ProductRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
+
 import java.util.List;
 
 @Service
@@ -159,6 +162,12 @@ public class CategoryService {
                 .stream()
                 .map(this::mapToResponse)
                 .toList();
+    }
+
+    /** Paginated variant used by the /api/v1/categories list endpoint. */
+    @Transactional(readOnly = true)
+    public Page<CategoryResponse> getAllCategories(Pageable pageable) {
+        return categoryRepository.findAll(pageable).map(this::mapToResponse);
     }
 
     private CategoryResponse mapToResponse(Category category) {

@@ -28,6 +28,7 @@ public class OrderAnalyticsService {
     private final CustomerAnalyticsService customerAnalyticsService;
     private final TimeAnalyticsService timeAnalyticsService;
     private final GeoAnalyticsService geoAnalyticsService;
+    private final FunnelAnalyticsService funnelAnalyticsService;
 
     public OrderAnalyticsService(
             OrderAnalyticsRepository orderRepository,
@@ -35,7 +36,8 @@ public class OrderAnalyticsService {
             ProductAnalyticsService productAnalyticsService,
             CustomerAnalyticsService customerAnalyticsService,
             TimeAnalyticsService timeAnalyticsService,
-            GeoAnalyticsService geoAnalyticsService
+            GeoAnalyticsService geoAnalyticsService,
+            FunnelAnalyticsService funnelAnalyticsService
     ) {
         this.orderRepository = orderRepository;
         this.itemRepository = itemRepository;
@@ -43,6 +45,7 @@ public class OrderAnalyticsService {
         this.customerAnalyticsService = customerAnalyticsService;
         this.timeAnalyticsService = timeAnalyticsService;
         this.geoAnalyticsService = geoAnalyticsService;
+        this.funnelAnalyticsService = funnelAnalyticsService;
     }
 
     /** ORDER_CREATED. The total is recomputed from the items in BigDecimal (exact). */
@@ -95,6 +98,7 @@ public class OrderAnalyticsService {
         customerAnalyticsService.recordOrderCreated(event.getUserId(), createdAt);
         timeAnalyticsService.recordOrderCreated(createdAt);
         geoAnalyticsService.recordOrderCreated(event.getUserId(), createdAt);
+        funnelAnalyticsService.recordOrderCreated(createdAt);
     }
 
     /** ORDER_STATUS_CHANGED. */
@@ -149,6 +153,7 @@ public class OrderAnalyticsService {
             customerAnalyticsService.recordOrderPaid(order.getUserId(), order.getTotalAmount(), order.getCreatedAt());
             timeAnalyticsService.recordOrderPaid(order.getCreatedAt(), order.getTotalAmount(), totalUnits);
             geoAnalyticsService.recordOrderPaid(order.getUserId(), order.getTotalAmount(), order.getCreatedAt());
+            funnelAnalyticsService.recordOrderPaid(order.getCreatedAt());
         }
 
         orderRepository.save(order);

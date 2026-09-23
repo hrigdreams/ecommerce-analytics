@@ -25,15 +25,18 @@ public class CartAnalyticsService {
     private final CartAnalyticsRepository cartRepository;
     private final CartItemAnalyticsRepository itemRepository;
     private final ProductAnalyticsService productAnalyticsService;
+    private final FunnelAnalyticsService funnelAnalyticsService;
 
     public CartAnalyticsService(
             CartAnalyticsRepository cartRepository,
             CartItemAnalyticsRepository itemRepository,
-            ProductAnalyticsService productAnalyticsService
+            ProductAnalyticsService productAnalyticsService,
+            FunnelAnalyticsService funnelAnalyticsService
     ) {
         this.cartRepository = cartRepository;
         this.itemRepository = itemRepository;
         this.productAnalyticsService = productAnalyticsService;
+        this.funnelAnalyticsService = funnelAnalyticsService;
     }
 
     private CartAnalytics getOrCreateCart(Long cartId, Long userId, Instant at) {
@@ -111,6 +114,7 @@ public class CartAnalyticsService {
         itemRepository.save(item);
 
         productAnalyticsService.recordCartAdd(event.getProductId(), event.getProductName(), at);
+        funnelAnalyticsService.recordCartItemAdded(at);
     }
 
     /** CART_ITEM_UPDATED (quantity change). */

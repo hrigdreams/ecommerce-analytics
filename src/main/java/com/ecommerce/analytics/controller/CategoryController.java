@@ -11,6 +11,10 @@ import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.responses.ApiResponses;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
@@ -75,6 +79,21 @@ public class CategoryController {
     @GetMapping
     public List<CategoryResponse> getAllCategories() {
         return categoryService.getAllCategories();
+    }
+
+    @Operation(
+            summary = "Get all categories (paginated)",
+            description = "Same as GET /api/v1/categories but page-able. Use this once the category list grows."
+    )
+    @GetMapping(params = {"page"})
+    public Page<CategoryResponse> getAllCategoriesPaged(
+            @Parameter(description = "Zero-based page index") @RequestParam(defaultValue = "0") int page,
+            @Parameter(description = "Page size (max 100)") @RequestParam(defaultValue = "20") int size,
+            @Parameter(description = "Field to sort by", example = "name") @RequestParam(defaultValue = "id") String sortBy
+    ) {
+        int safeSize = Math.min(Math.max(size, 1), 100);
+        Pageable pageable = PageRequest.of(Math.max(page, 0), safeSize, Sort.by(sortBy).ascending());
+        return categoryService.getAllCategories(pageable);
     }
 
     @Operation(

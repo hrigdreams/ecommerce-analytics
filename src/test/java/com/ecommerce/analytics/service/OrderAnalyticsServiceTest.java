@@ -32,6 +32,7 @@ class OrderAnalyticsServiceTest {
     private CustomerAnalyticsService customerAnalyticsService;
     private TimeAnalyticsService timeAnalyticsService;
     private GeoAnalyticsService geoAnalyticsService;
+    private FunnelAnalyticsService funnelAnalyticsService;
     private OrderAnalyticsService service;
 
     private final Instant at = Instant.parse("2026-09-21T10:00:00Z");
@@ -44,9 +45,11 @@ class OrderAnalyticsServiceTest {
         customerAnalyticsService = mock(CustomerAnalyticsService.class);
         timeAnalyticsService = mock(TimeAnalyticsService.class);
         geoAnalyticsService = mock(GeoAnalyticsService.class);
+        funnelAnalyticsService = mock(FunnelAnalyticsService.class);
         service = new OrderAnalyticsService(
                 orderRepository, itemRepository, productAnalyticsService,
-                customerAnalyticsService, timeAnalyticsService, geoAnalyticsService
+                customerAnalyticsService, timeAnalyticsService, geoAnalyticsService,
+                funnelAnalyticsService
         );
     }
 
@@ -144,5 +147,30 @@ class OrderAnalyticsServiceTest {
 
         assertEquals("SHIPPED", order.getStatus());
         verify(orderRepository).save(order);
+    }
+
+    @Test
+    void recordOrderCreated_shouldRecordFunnelStage() {
+        OrderCreatedEvent event = new OrderCreatedEvent(
+                1L, 7L, "PENDING", "UNPAID", BigDecimal.TEN, at, List.of());
+        when(orderRepository.existsById(1L)).thenReturn(false);
+
+        service.recordOrderCreated(event, at);
+
+        verify(funnelAnalyticsService).recordOrderCreated(at);
+    }
+
+    @Test
+    void recordPayment_paid_shouldRecordFunnelStageOnlyOnce() {
+        OrderAnalytics order = new OrderAnalytics();
+        order.setOrderId(1L);
+        order.setCreatedAt(at);
+        when(orderRepository.findById(1L)).thenReturn(java.util.Optional.of(order));
+        when(itemRepository.findByOrderId(1L)).thenReturn(List.of());
+
+        service.recordPayment(1L, "PAID", at);
+        service.recordPayment(1L, "PAID", at);
+
+        verify(funnelAnalyticsService, org.mockito.Mockito.times(1)).recordOrderPaid(at);
     }
 }
