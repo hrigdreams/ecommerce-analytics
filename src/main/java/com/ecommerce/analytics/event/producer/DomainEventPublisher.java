@@ -45,12 +45,7 @@ public class DomainEventPublisher {
         }
     }
 
-    /**
-     * Sends immediately, ignoring any active transaction. Use only for events that
-     * must be recorded regardless of whether the surrounding transaction commits —
-     * e.g. CHECKOUT_STARTED, which should count as a funnel "start" even if the
-     * order that follows fails validation and rolls back.
-     */
+
     public void publishNow(EventEnvelope<?> event) {
         send(event, String.valueOf(event.getAggregateId()));
     }
