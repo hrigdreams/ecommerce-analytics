@@ -25,11 +25,12 @@ public class CacheConfig {
 
     public static final String CUSTOMER_SUMMARY_CACHE = "customerSummary";
     public static final String TIME_ANALYTICS_CACHE = "timeAnalytics";
+    public static final String UNIFIED_ANALYTICS_CACHE = "unifiedAnalytics";
 
     @Bean
     public CacheManager cacheManager() {
         CaffeineCacheManager manager = new CaffeineCacheManager(
-                CUSTOMER_SUMMARY_CACHE, TIME_ANALYTICS_CACHE
+                CUSTOMER_SUMMARY_CACHE, TIME_ANALYTICS_CACHE, UNIFIED_ANALYTICS_CACHE
         );
         manager.setCaffeine(
                 Caffeine.newBuilder()
