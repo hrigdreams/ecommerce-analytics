@@ -41,3 +41,6 @@ context-test.log
 HELP.md
 
 dependency-reduced-pom.xml
+
+# Markdown documentation
+*.md
