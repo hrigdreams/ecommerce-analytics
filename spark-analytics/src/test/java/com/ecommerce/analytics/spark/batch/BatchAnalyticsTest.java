@@ -19,7 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 
 class BatchAnalyticsTest extends SparkTestSupport {
 
-// small reminder
+
     private static Timestamp utc(String isoInstant) {
         return Timestamp.from(Instant.parse(isoInstant));
     }

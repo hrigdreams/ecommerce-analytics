@@ -18,10 +18,18 @@ import java.util.stream.Collectors;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-// quick note
+/**
+ * Verifies the JSON-parsing and window-bucketing/aggregation math against
+ * ordinary static DataFrames (see StreamingAnalytics' class doc for why this
+ * is a valid way to test Structured Streaming transformation logic without a
+ * real Kafka broker). It does NOT verify incremental micro-batch execution
+ * or watermark-based state eviction - only genuine streaming execution
+ * exercises that, which is covered by the manual end-to-end run in
+ * README.md instead.
+ */
 class StreamingAnalyticsTest extends SparkTestSupport {
 
-// small reminder
+    /** Builds a one-column ("value") DataFrame of raw JSON strings, mimicking Kafka's raw source schema. */
     private Dataset<Row> kafkaValues(String... jsonMessages) {
         StructType schema = new StructType(new StructField[]{
                 new StructField("value", DataTypes.BinaryType, true, Metadata.empty())
@@ -63,7 +71,9 @@ class StreamingAnalyticsTest extends SparkTestSupport {
         assertEquals("Order", row.getAs("aggregate_type"));
         assertEquals(100L, row.<Long>getAs("aggregate_id"));
         assertEquals(59.98, row.<Double>getAs("order_total_amount"), 0.001);
-// just a note
+        // UTC instant, not Timestamp.valueOf (JVM-local-zone-dependent) - occurredAt
+        // in the source JSON is "...05Z", a true UTC instant, so the parsed
+        // event_time must be compared against an equally explicit UTC value.
         assertEquals(Timestamp.from(java.time.Instant.parse("2026-09-24T10:00:05Z")), row.getAs("event_time"));
     }
 
@@ -85,16 +95,13 @@ class StreamingAnalyticsTest extends SparkTestSupport {
         List<Row> result = StreamingAnalytics.eventCountsByWindow(parsed, "1 minute", "2 minutes").collectAsList();
 
         Map<String, Long> byTypeAndMinute = result.stream().collect(Collectors.toMap(
-                r -> {
-                    Timestamp windowStart = r.getAs("window_start");
-                    return r.getAs("event_type") + "@" + windowStart.toInstant();
-                },
+                r -> r.getAs("event_type") + "@" + r.getAs("window_start").toString(),
                 r -> r.getAs("event_count")
         ));
 
-        assertEquals(2L, byTypeAndMinute.get("ORDER_CREATED@2026-09-24T10:00:00Z"));
-        assertEquals(1L, byTypeAndMinute.get("ORDER_CREATED@2026-09-24T10:01:00Z"));
-        assertEquals(1L, byTypeAndMinute.get("PAYMENT_CREATED@2026-09-24T10:00:00Z"));
+        assertEquals(2L, byTypeAndMinute.get("ORDER_CREATED@2026-09-24 10:00:00.0"));
+        assertEquals(1L, byTypeAndMinute.get("ORDER_CREATED@2026-09-24 10:01:00.0"));
+        assertEquals(1L, byTypeAndMinute.get("PAYMENT_CREATED@2026-09-24 10:00:00.0"));
     }
 
     @Test

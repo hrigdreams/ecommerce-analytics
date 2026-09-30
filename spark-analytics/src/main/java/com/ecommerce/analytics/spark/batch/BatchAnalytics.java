@@ -5,264 +5,138 @@ import org.apache.spark.sql.Row;
 
 import static org.apache.spark.sql.functions.*;
 
-// rough idea
+/**
+ * Pure DataFrame transformations - no SparkSession creation, no JDBC I/O -
+ * so each one is unit-testable against small in-memory DataFrames (see
+ * BatchAnalyticsTest) without a real Postgres database. SparkBatchAnalyticsJob
+ * is the only class that reads/writes anything; this class only computes.
+ *
+ * Inputs are expected to already be filtered to the historical window
+ * (created_at < cutoff) by the caller - see SparkBatchAnalyticsJob.
+ *
+ * Every join uses explicit DataFrame aliases (.as("o"), .as("p"), ...) and
+ * plain "alias.column" string references rather than capturing .col()
+ * handles across transformed/aggregated DataFrames - the latter is a
+ * well-known Spark footgun (ambiguous/stale column references once a
+ * DataFrame has been grouped or re-derived), so this style is used
+ * throughout on purpose.
+ */
 public final class BatchAnalytics {
 
-    private BatchAnalytics() {
-    }
+    private BatchAnalytics() {}
 
-// just keeping it in mind
+    /** Units sold, revenue and order count per product, counting only PAID orders. */
     public static Dataset<Row> productPerformance(
-            Dataset<Row> orders,
-            Dataset<Row> orderItems,
-            Dataset<Row> products) {
+            Dataset<Row> orders, Dataset<Row> orderItems, Dataset<Row> products) {
 
-        Dataset<Row> paid = orders
-                .filter(col("payment_status").equalTo("PAID"))
-                .as("o");
-
+        Dataset<Row> paid = orders.filter(col("payment_status").equalTo("PAID")).as("o");
         Dataset<Row> oi = orderItems.as("oi");
 
-        Dataset<Row> soldItems = oi
-                .join(
-                        paid,
-                        col("oi.order_id").equalTo(col("o.id")),
-                        "inner"
-                )
+        Dataset<Row> soldItems = oi.join(paid, col("oi.order_id").equalTo(col("o.id")), "inner")
                 .groupBy(col("oi.product_id").alias("product_id"))
                 .agg(
                         sum(col("oi.quantity")).alias("units_sold"),
-                        sum(
-                                col("oi.quantity")
-                                        .multiply(col("oi.unit_price"))
-                        ).alias("revenue"),
-                        countDistinct(col("oi.order_id"))
-                                .alias("order_count")
+                        sum(col("oi.quantity").multiply(col("oi.unit_price"))).alias("revenue"),
+                        countDistinct(col("oi.order_id")).alias("order_count")
                 )
                 .as("sold");
 
-        return products
-                .as("p")
-                .join(
-                        soldItems,
-                        col("p.id").equalTo(col("sold.product_id")),
-                        "left"
-                )
+        return products.as("p")
+                .join(soldItems, col("p.id").equalTo(col("sold.product_id")), "left")
                 .select(
                         col("p.id").alias("product_id"),
                         col("p.name").alias("product_name"),
                         col("p.category_id").alias("category_id"),
-                        coalesce(
-                                col("sold.units_sold"),
-                                lit(0)
-                        ).alias("units_sold"),
-                        coalesce(
-                                col("sold.revenue"),
-                                lit(0.0)
-                        )
-                                .cast("decimal(14,2)")
-                                .alias("revenue"),
-                        coalesce(
-                                col("sold.order_count"),
-                                lit(0)
-                        ).alias("order_count")
+                        coalesce(col("sold.units_sold"), lit(0)).alias("units_sold"),
+                        coalesce(col("sold.revenue"), lit(0.0)).cast("decimal(14,2)").alias("revenue"),
+                        coalesce(col("sold.order_count"), lit(0)).alias("order_count")
                 );
     }
 
-// small reminder
-    public static Dataset<Row> categoryPerformance(
-            Dataset<Row> productPerformance,
-            Dataset<Row> categories) {
-
-        Dataset<Row> byCategory = productPerformance
-                .as("pp")
+    /** Rolls product-level performance up to category level, plus how many distinct products each category has. */
+    public static Dataset<Row> categoryPerformance(Dataset<Row> productPerformance, Dataset<Row> categories) {
+        Dataset<Row> byCategory = productPerformance.as("pp")
                 .groupBy(col("pp.category_id").alias("category_id"))
                 .agg(
-                        countDistinct(col("pp.product_id"))
-                                .alias("product_count"),
-                        sum(col("pp.units_sold"))
-                                .alias("units_sold"),
-                        sum(col("pp.revenue"))
-                                .alias("revenue")
+                        countDistinct(col("pp.product_id")).alias("product_count"),
+                        sum(col("pp.units_sold")).alias("units_sold"),
+                        sum(col("pp.revenue")).alias("revenue")
                 )
                 .as("bc");
 
-        return categories
-                .as("c")
-                .join(
-                        byCategory,
-                        col("c.id").equalTo(col("bc.category_id")),
-                        "left"
-                )
+        return categories.as("c")
+                .join(byCategory, col("c.id").equalTo(col("bc.category_id")), "left")
                 .select(
                         col("c.id").alias("category_id"),
                         col("c.name").alias("category_name"),
-                        coalesce(
-                                col("bc.product_count"),
-                                lit(0)
-                        ).alias("product_count"),
-                        coalesce(
-                                col("bc.units_sold"),
-                                lit(0)
-                        ).alias("units_sold"),
-                        coalesce(
-                                col("bc.revenue"),
-                                lit(0.0)
-                        )
-                                .cast("decimal(14,2)")
-                                .alias("revenue")
+                        coalesce(col("bc.product_count"), lit(0)).alias("product_count"),
+                        coalesce(col("bc.units_sold"), lit(0)).alias("units_sold"),
+                        coalesce(col("bc.revenue"), lit(0.0)).cast("decimal(14,2)").alias("revenue")
                 );
     }
 
-// quick check
+    /** Per-customer order counts and spend - the "who are our best customers" view. */
     public static Dataset<Row> customerBehavior(Dataset<Row> orders) {
-
-        return orders
-                .as("o")
+        return orders.as("o")
                 .groupBy(col("o.user_id").alias("user_id"))
                 .agg(
                         count(lit(1)).alias("total_orders"),
-
-                        count(
-                                when(
-                                        col("o.payment_status")
-                                                .equalTo("PAID"),
-                                        1
-                                )
-                        ).alias("paid_orders"),
-
-                        sum(
-                                when(
-                                        col("o.payment_status")
-                                                .equalTo("PAID"),
-                                        col("o.total_amount")
-                                ).otherwise(0.0)
-                        ).alias("total_spend"),
-
-                        min(col("o.created_at"))
-                                .alias("first_order_at"),
-
-                        max(col("o.created_at"))
-                                .alias("last_order_at")
+                        count(when(col("o.payment_status").equalTo("PAID"), 1)).alias("paid_orders"),
+                        sum(when(col("o.payment_status").equalTo("PAID"), col("o.total_amount")).otherwise(0.0))
+                                .alias("total_spend"),
+                        min(col("o.created_at")).alias("first_order_at"),
+                        max(col("o.created_at")).alias("last_order_at")
                 )
-                .withColumn(
-                        "avg_order_value",
-                        when(
-                                col("paid_orders").gt(0),
-                                col("total_spend")
-                                        .divide(col("paid_orders"))
-                        )
-                                .otherwise(lit(0.0))
-                                .cast("decimal(12,2)")
-                )
-                .withColumn(
-                        "total_spend",
-                        col("total_spend")
-                                .cast("decimal(14,2)")
-                );
+                .withColumn("avg_order_value",
+                        when(col("paid_orders").gt(0), col("total_spend").divide(col("paid_orders")))
+                                .otherwise(lit(0.0)).cast("decimal(12,2)"))
+                .withColumn("total_spend", col("total_spend").cast("decimal(14,2)"));
     }
 
-// quick check
+    /** Daily order/revenue trend across the whole historical window. */
     public static Dataset<Row> dailyRevenueTrend(Dataset<Row> orders) {
-
         return orders
-                .withColumn(
-                        "day",
-                        to_date(col("created_at"))
-                )
+                .withColumn("day", to_date(col("created_at")))
                 .groupBy(col("day"))
                 .agg(
-                        count(lit(1))
-                                .alias("order_count"),
-
-                        count(
-                                when(
-                                        col("payment_status")
-                                                .equalTo("PAID"),
-                                        1
-                                )
-                        ).alias("paid_order_count"),
-
-                        sum(
-                                when(
-                                        col("payment_status")
-                                                .equalTo("PAID"),
-                                        col("total_amount")
-                                ).otherwise(0.0)
-                        )
-                                .cast("decimal(14,2)")
-                                .alias("revenue")
+                        count(lit(1)).alias("order_count"),
+                        count(when(col("payment_status").equalTo("PAID"), 1)).alias("paid_order_count"),
+                        sum(when(col("payment_status").equalTo("PAID"), col("total_amount")).otherwise(0.0))
+                                .cast("decimal(14,2)").alias("revenue")
                 )
                 .orderBy(col("day"));
     }
 
-// rough idea
-    public static Dataset<Row> geoPerformance(
-            Dataset<Row> orders,
-            Dataset<Row> users) {
-
-        return orders
-                .as("o")
-                .join(
-                        users.as("u"),
-                        col("o.user_id").equalTo(col("u.id")),
-                        "inner"
-                )
-                .groupBy(
-                        col("u.country").alias("country"),
-                        col("u.city").alias("city")
-                )
+    /** Orders/revenue by customer country+city - where the demand actually is. */
+    public static Dataset<Row> geoPerformance(Dataset<Row> orders, Dataset<Row> users) {
+        return orders.as("o")
+                .join(users.as("u"), col("o.user_id").equalTo(col("u.id")), "inner")
+                .groupBy(col("u.country").alias("country"), col("u.city").alias("city"))
                 .agg(
-                        count(lit(1))
-                                .alias("order_count"),
-
-                        count(
-                                when(
-                                        col("o.payment_status")
-                                                .equalTo("PAID"),
-                                        1
-                                )
-                        ).alias("paid_order_count"),
-
-                        sum(
-                                when(
-                                        col("o.payment_status")
-                                                .equalTo("PAID"),
-                                        col("o.total_amount")
-                                ).otherwise(0.0)
-                        )
-                                .cast("decimal(14,2)")
-                                .alias("revenue")
+                        count(lit(1)).alias("order_count"),
+                        count(when(col("o.payment_status").equalTo("PAID"), 1)).alias("paid_order_count"),
+                        sum(when(col("o.payment_status").equalTo("PAID"), col("o.total_amount")).otherwise(0.0))
+                                .cast("decimal(14,2)").alias("revenue")
                 )
                 .orderBy(col("revenue").desc());
     }
 
-// quick note
+    /**
+     * Recurring hour-of-day demand pattern (0-23), aggregated across the WHOLE
+     * historical window. Deliberately different from the Spring app's
+     * TimeAnalytics, which buckets by absolute HOUR/DAY/WEEK/MONTH/YEAR
+     * timestamps (a timeline); this answers "what time of day do people
+     * shop", which a full historical scan like Spark's can answer cheaply -
+     * the transactional service was never meant to compute it.
+     */
     public static Dataset<Row> hourOfDayPattern(Dataset<Row> orders) {
-
         return orders
-                .filter(
-                        col("payment_status")
-                                .notEqual("CANCELLED")
-                )
-                .withColumn(
-                        "hour_of_day",
-                        hour(col("created_at"))
-                )
+                .withColumn("hour_of_day", hour(col("created_at")))
                 .groupBy(col("hour_of_day"))
                 .agg(
-                        count(lit(1))
-                                .alias("order_count"),
-
-                        sum(
-                                when(
-                                        col("payment_status")
-                                                .equalTo("PAID"),
-                                        col("total_amount")
-                                ).otherwise(0.0)
-                        )
-                                .cast("decimal(14,2)")
-                                .alias("revenue")
+                        count(lit(1)).alias("order_count"),
+                        sum(when(col("payment_status").equalTo("PAID"), col("total_amount")).otherwise(0.0))
+                                .cast("decimal(14,2)").alias("revenue")
                 )
                 .orderBy(col("hour_of_day"));
     }

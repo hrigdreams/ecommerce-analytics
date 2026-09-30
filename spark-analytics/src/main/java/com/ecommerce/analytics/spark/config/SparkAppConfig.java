@@ -3,7 +3,13 @@ package com.ecommerce.analytics.spark.config;
 import java.time.Instant;
 import java.util.Properties;
 
-// local note
+/**
+ * Central place for every environment-specific value both Spark jobs need.
+ * Everything is read from environment variables, with local-dev defaults
+ * that match the main Spring Boot app's own application.properties
+ * (DB_URL / DB_USERNAME / DB_PASSWORD / KAFKA_BOOTSTRAP_SERVERS), so the
+ * same shell environment works for either process. Nothing is hardcoded.
+ */
 public final class SparkAppConfig {
 
     public final String dbUrl;
@@ -13,12 +19,12 @@ public final class SparkAppConfig {
     public final String kafkaBootstrapServers;
     public final String kafkaTopic;
 
-// small reminder
+    /** Distinct from the Spring app's "analytics-consumer" group - required so Spark never interferes with it. */
     public final String kafkaConsumerGroupId;
 
     public final String checkpointBaseLocation;
 
-// not touching this
+    /** Rows/events with occurredAt before this are DataGenerator's historical baseline (see LiveTrafficSimulator's docs). Null = now(). */
     public final Instant historicalCutoff;
 
     public final String windowDuration;

@@ -13,13 +13,35 @@ import org.slf4j.LoggerFactory;
 import java.util.Properties;
 import java.util.concurrent.TimeoutException;
 
-// local note
+/**
+ * Kafka (ecommerce.domain.events.v1) -> Spark Structured Streaming ->
+ * spark_streaming_* analytics tables.
+ *
+ * This is an ADDITIONAL Kafka consumer, not a replacement for the existing
+ * Spring @KafkaListener consumer:
+ *   - its own consumer group id (SparkAppConfig#kafkaConsumerGroupId,
+ *     default "spark-streaming-analytics", NOT "analytics-consumer")
+ *   - its own checkpoint directory, entirely separate from anything the
+ *     Spring app tracks (it does not use the processed_events table -
+ *     Spark's checkpoint is its own exactly-once offset/state store)
+ *   - startingOffsets defaults to "latest", so a fresh run does not
+ *     re-process years of history through a windowed streaming job; it
+ *     only sees events produced from the moment it starts (i.e. live
+ *     traffic - see LiveTrafficSimulator's docs on the historical cutoff)
+ * Both consumers read the same topic independently and neither affects the
+ * other's committed offsets, because Kafka tracks offsets per consumer
+ * group.
+ *
+ * Run: see README.md ("Running the streaming job").
+ */
 public class SparkStreamingAnalyticsJob {
 
     private static final Logger log = LoggerFactory.getLogger(SparkStreamingAnalyticsJob.class);
 
     public static void main(String[] args) throws Exception {
-// small reminder
+        // See SparkTestSupport for why this AND spark.sql.session.timeZone (below)
+        // are both needed - they fix two different timezone touchpoints (plain
+        // java.sql.Timestamp/Date rendering vs. Spark SQL's own date/time functions).
         java.util.TimeZone.setDefault(java.util.TimeZone.getTimeZone("UTC"));
 
         SparkAppConfig config = SparkAppConfig.load();
@@ -28,7 +50,9 @@ public class SparkStreamingAnalyticsJob {
         try (SparkSession spark = SparkSession.builder()
                 .appName("ecommerce-spark-streaming-analytics")
                 .master(System.getProperty("spark.master", "local[*]"))
-// keeping this simple
+                // See SparkTestSupport for why this must be pinned: window()/to_timestamp()
+                // otherwise interpret occurredAt in the HOST MACHINE's default timezone
+                // instead of UTC, silently shifting every window boundary.
                 .config("spark.sql.session.timeZone", "UTC")
                 .getOrCreate()) {
 
@@ -61,7 +85,7 @@ public class SparkStreamingAnalyticsJob {
                     config.windowDuration, config.watermarkDelay, config.triggerInterval, config.startingOffsets);
 
             spark.streams().awaitAnyTermination();
-// rough idea
+            // If one query fails, surface why rather than let the JVM hang silently.
             for (StreamingQuery q : new StreamingQuery[]{eventCounts, orderActivity, paidRevenue}) {
                 if (q.exception().isDefined()) {
                     log.error("Query {} terminated with exception", q.name(), q.exception().get());
@@ -70,7 +94,11 @@ public class SparkStreamingAnalyticsJob {
         }
     }
 
-// not touching this
+    /**
+     * append output mode: a window's row is only ever emitted once, after the
+     * watermark passes its end - which is exactly what a plain JDBC INSERT
+     * wants (no upsert/dedupe logic needed downstream).
+     */
     private static StreamingQuery startJdbcSink(
             Dataset<Row> windowedAgg, SparkAppConfig config, String table, String queryName) throws TimeoutException {
 
