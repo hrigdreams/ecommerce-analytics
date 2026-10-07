@@ -13,7 +13,6 @@ public class SecurityConfig {
 
         return http
                 .authorizeHttpRequests(auth -> auth
-                        // Swagger
                         .requestMatchers(
                                 "/swagger-ui.html",
                                 "/swagger-ui/**",
@@ -37,7 +36,8 @@ public class SecurityConfig {
                                 "/api/v1/payments/**",
                                 "/api/v1/reviews/**",
                                 "/api/v1/analytics/**",
-                                "/api/v1/simulator/**"
+                                "/api/v1/simulator/**",
+                                "/api/v1/search/**"
                         ).permitAll()
 
                         .anyRequest().authenticated()
