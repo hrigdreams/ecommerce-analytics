@@ -77,6 +77,27 @@ public class ProductDocument {
     @Field(type = FieldType.Integer)
     private Integer reviewCount;
 
+    // ------------------------------------------------------------------------
+    // NEW BUSINESS RANKING FIELDS
+    // These fields are populated asynchronously by analytics/Spark jobs via
+    // Partial Updates, completely bypassing the PostgreSQL core database.
+    // Default values ensure backward compatibility with older documents.
+    // ------------------------------------------------------------------------
+
+    @Field(type = FieldType.Long)
+    private Long salesCount = 0L;
+
+    @Field(type = FieldType.Double)
+    private Double popularityScore = 0.0;
+
+    @Field(type = FieldType.Boolean)
+    private Boolean inStock = true;
+
+    @Field(type = FieldType.Date)
+    private Instant createdAt = Instant.now();
+
+    // ------------------------------------------------------------------------
+
     /**
      * Ordering/staleness guard (see ProductIndexingService): an incoming
      * event only overwrites this document if its occurredAt is strictly
@@ -127,6 +148,20 @@ public class ProductDocument {
 
     public Integer getReviewCount() { return reviewCount; }
     public void setReviewCount(Integer reviewCount) { this.reviewCount = reviewCount; }
+
+    // --- New Ranking Getters & Setters ---
+    public Long getSalesCount() { return salesCount; }
+    public void setSalesCount(Long salesCount) { this.salesCount = salesCount; }
+
+    public Double getPopularityScore() { return popularityScore; }
+    public void setPopularityScore(Double popularityScore) { this.popularityScore = popularityScore; }
+
+    public Boolean getInStock() { return inStock; }
+    public void setInStock(Boolean inStock) { this.inStock = inStock; }
+
+    public Instant getCreatedAt() { return createdAt; }
+    public void setCreatedAt(Instant createdAt) { this.createdAt = createdAt; }
+    // -------------------------------------
 
     public Instant getLastEventOccurredAt() { return lastEventOccurredAt; }
     public void setLastEventOccurredAt(Instant lastEventOccurredAt) { this.lastEventOccurredAt = lastEventOccurredAt; }
