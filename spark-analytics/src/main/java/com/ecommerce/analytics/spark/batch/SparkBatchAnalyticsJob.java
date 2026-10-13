@@ -22,6 +22,20 @@ import java.util.Properties;
  * by the existing Kafka consumer; this job never writes to them, so there
  * is no risk of two writers racing on the same row.
  *
+ * Note on spark_batch_product_popularity specifically: unlike the other
+ * spark_batch_* tables (all filtered to created_at < historicalCutoff -
+ * "historical" analytics by definition), popularity is read over orders/
+ * order_items WITHOUT that cutoff filter. A recency-weighted ranking signal
+ * that only ever saw data older than the cutoff would decay towards zero
+ * for every product as real time moves past that fixed point - the whole
+ * point of this feature is "what's popular right now", so it must see
+ * today's orders too, not just the frozen historical baseline. This does
+ * not reintroduce Spark Batch/Streaming double-counting (the concern the
+ * historicalCutoff concept exists to prevent): popularity is a derived
+ * score written to its OWN table by Spark Batch alone - Spark Streaming
+ * does not compute or touch popularityScore anywhere - so there is no
+ * second writer to double-count against.
+ *
  * Run: see README.md ("Running the batch job").
  */
 public class SparkBatchAnalyticsJob {
@@ -53,9 +67,13 @@ public class SparkBatchAnalyticsJob {
     static void run(SparkSession spark, SparkAppConfig config) {
         Properties jdbcProps = config.jdbcConnectionProperties();
         Timestamp cutoff = Timestamp.from(config.historicalCutoff);
+        Timestamp now = Timestamp.from(java.time.Instant.now());
 
         Dataset<Row> orders = readFiltered(spark, config.dbUrl, jdbcProps,
                 "orders", "created_at", cutoff);
+        // Unfiltered (no historicalCutoff) - see class doc above for why popularity
+        // needs to see all orders, not just the pre-cutoff historical baseline.
+        Dataset<Row> allOrders = spark.read().jdbc(config.dbUrl, "orders", jdbcProps);
         Dataset<Row> orderItems = spark.read().jdbc(config.dbUrl, "order_items", jdbcProps);
         Dataset<Row> products = spark.read().jdbc(config.dbUrl, "products", jdbcProps);
         Dataset<Row> categories = spark.read().jdbc(config.dbUrl, "categories", jdbcProps);
@@ -71,6 +89,8 @@ public class SparkBatchAnalyticsJob {
         Dataset<Row> dailyRevenueTrend = BatchAnalytics.dailyRevenueTrend(orders);
         Dataset<Row> geoPerformance = BatchAnalytics.geoPerformance(orders, users);
         Dataset<Row> hourOfDayPattern = BatchAnalytics.hourOfDayPattern(orders);
+        Dataset<Row> productPopularity = BatchAnalytics.productPopularity(
+                allOrders, orderItems, products, now, config.popularityHalfLifeDays);
 
         write(productPerformance, config, jdbcProps, "spark_batch_product_performance");
         write(categoryPerformance, config, jdbcProps, "spark_batch_category_performance");
@@ -78,6 +98,7 @@ public class SparkBatchAnalyticsJob {
         write(dailyRevenueTrend, config, jdbcProps, "spark_batch_revenue_trend");
         write(geoPerformance, config, jdbcProps, "spark_batch_geo_performance");
         write(hourOfDayPattern, config, jdbcProps, "spark_batch_hourly_pattern");
+        write(productPopularity, config, jdbcProps, "spark_batch_product_popularity");
 
         orders.unpersist();
         log.info("Spark batch analytics job finished successfully.");

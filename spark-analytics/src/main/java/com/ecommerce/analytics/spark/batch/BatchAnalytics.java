@@ -3,6 +3,8 @@ package com.ecommerce.analytics.spark.batch;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 
+import java.sql.Timestamp;
+
 import static org.apache.spark.sql.functions.*;
 
 /**
@@ -139,5 +141,72 @@ public final class BatchAnalytics {
                                 .cast("decimal(14,2)").alias("revenue")
                 )
                 .orderBy(col("hour_of_day"));
+    }
+
+    /**
+     * Time-decayed popularity score per product: every PAID order item
+     * contributes {@code quantity * exp(-ln(2)/halfLifeDays * ageInDays)} to
+     * its product's score, so a unit sold today counts for ~1.0, a unit sold
+     * one half-life ago counts for ~0.5, two half-lives ago ~0.25, and so
+     * on - recent sales dominate, old sales fade out smoothly rather than
+     * dropping off a hard cliff at some fixed "last N days" boundary.
+     * Exponential decay (rather than e.g. a flat recent-window cutoff) is
+     * the standard choice for this kind of "recency-weighted popularity"
+     * signal precisely because it has no arbitrary edge - nothing jumps or
+     * disappears the instant it crosses a day-count threshold.
+     * <p>
+     * Deliberately only counts PAID orders (same filter productPerformance
+     * already uses) - an unpaid/pending/cancelled order was never a real
+     * sale and should not inflate a "how popular is this right now" signal,
+     * any more than it counts toward units_sold/revenue elsewhere in this
+     * class.
+     * <p>
+     * {@code asOf} is passed in (not computed as "now" inside this method)
+     * so the computation stays a pure, deterministic function of its inputs
+     * for testability - see BatchAnalyticsTest's existing style, and
+     * ProductPopularityAnalyticsTest for this method's own tests.
+     *
+     * @param orders       full orders DataFrame (payment_status, created_at, ...)
+     * @param orderItems   full order_items DataFrame (order_id, product_id, quantity, ...)
+     * @param products     products DataFrame - left-joined against so EVERY product
+     *                     appears in the output (score 0.0 if never ordered), matching
+     *                     productPerformance's "every product appears" convention
+     * @param asOf         the reference instant "now" is measured from
+     * @param halfLifeDays after this many days, a unit of past quantity contributes half
+     *                     as much as it did on the day of sale; must be &gt; 0
+     */
+    public static Dataset<Row> productPopularity(
+            Dataset<Row> orders, Dataset<Row> orderItems, Dataset<Row> products,
+            Timestamp asOf, double halfLifeDays) {
+
+        if (halfLifeDays <= 0) {
+            throw new IllegalArgumentException("halfLifeDays must be > 0, got " + halfLifeDays);
+        }
+
+        double lambda = Math.log(2.0) / halfLifeDays;
+
+        Dataset<Row> paid = orders.filter(col("payment_status").equalTo("PAID")).as("o");
+        Dataset<Row> oi = orderItems.as("oi");
+
+        // age in days = (asOf - created_at) in seconds / 86400, clamped at 0 so a
+        // clock-skewed/future-dated row can never produce a > 1.0 "bonus" weight.
+        Dataset<Row> weighted = oi.join(paid, col("oi.order_id").equalTo(col("o.id")), "inner")
+                .withColumn("age_days",
+                        greatest(
+                                (lit(asOf.getTime() / 1000.0).minus(unix_timestamp(col("o.created_at")))).divide(86400.0),
+                                lit(0.0)))
+                .withColumn("decay_weight", exp(lit(-lambda).multiply(col("age_days"))))
+                .withColumn("weighted_quantity", col("oi.quantity").multiply(col("decay_weight")))
+                .groupBy(col("oi.product_id").alias("product_id"))
+                .agg(sum(col("weighted_quantity")).alias("popularity_score"))
+                .as("w");
+
+        return products.as("p")
+                .join(weighted, col("p.id").equalTo(col("w.product_id")), "left")
+                .select(
+                        col("p.id").alias("product_id"),
+                        coalesce(col("w.popularity_score"), lit(0.0)).cast("decimal(14,6)").alias("popularity_score"),
+                        lit(asOf).alias("computed_at")
+                );
     }
 }

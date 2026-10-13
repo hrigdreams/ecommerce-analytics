@@ -33,6 +33,9 @@ public final class SparkAppConfig {
     public final String triggerInterval;
     public final String startingOffsets;
 
+    /** See BatchAnalytics#productPopularity - after this many days, past quantity contributes half as much. */
+    public final double popularityHalfLifeDays;
+
     private SparkAppConfig(Properties p) {
         this.dbUrl = env("DB_URL", "jdbc:postgresql://localhost:5432/ecommerce_analytics");
         this.dbUser = env("DB_USERNAME", "postgres");
@@ -52,6 +55,8 @@ public final class SparkAppConfig {
         this.watermarkDelay = env("SPARK_WATERMARK_DELAY", "2 minutes");
         this.triggerInterval = env("SPARK_TRIGGER_INTERVAL", "30 seconds");
         this.startingOffsets = env("SPARK_STARTING_OFFSETS", "latest");
+
+        this.popularityHalfLifeDays = Double.parseDouble(env("SPARK_POPULARITY_HALF_LIFE_DAYS", "14"));
     }
 
     public static SparkAppConfig load() {
@@ -73,7 +78,7 @@ public final class SparkAppConfig {
 
     @Override
     public String toString() {
-        return "SparkAppConfig{dbUrl=%s, kafkaBootstrapServers=%s, kafkaTopic=%s, kafkaConsumerGroupId=%s, checkpointBaseLocation=%s, historicalCutoff=%s}"
-                .formatted(dbUrl, kafkaBootstrapServers, kafkaTopic, kafkaConsumerGroupId, checkpointBaseLocation, historicalCutoff);
+        return "SparkAppConfig{dbUrl=%s, kafkaBootstrapServers=%s, kafkaTopic=%s, kafkaConsumerGroupId=%s, checkpointBaseLocation=%s, historicalCutoff=%s, popularityHalfLifeDays=%s}"
+                .formatted(dbUrl, kafkaBootstrapServers, kafkaTopic, kafkaConsumerGroupId, checkpointBaseLocation, historicalCutoff, popularityHalfLifeDays);
     }
 }
