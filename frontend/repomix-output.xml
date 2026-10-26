@@ -1,0 +1,1799 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+src/
+  api/
+    client.ts
+    hooks.ts
+  components/
+    layout/
+      AppLayout.tsx
+      Header.tsx
+      Sidebar.tsx
+    ui/
+      Badge.tsx
+      Button.tsx
+      Card.tsx
+      Table.tsx
+  lib/
+    utils.ts
+  pages/
+    CatalogPage.tsx
+    DashboardPage.tsx
+    OperationsPage.tsx
+  types/
+    index.ts
+  utils/
+    formatters.ts
+  App.tsx
+  index.css
+  main.tsx
+  vite-env.d.ts
+.gitignore
+index.html
+package.json
+postcss.config.js
+tailwind.config.js
+tsconfig.app.json
+tsconfig.json
+tsconfig.node.json
+vite.config.ts
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="src/api/client.ts">
+import axios from 'axios';
+
+/**
+ * Single Axios instance for the Spring Boot backend. Every API call in the
+ * app goes through this client so base URL, timeout and error shape stay
+ * consistent in one place.
+ */
+export const apiClient = axios.create({
+  baseURL: 'http://localhost:8080/api/v1',
+  timeout: 10_000,
+  headers: {
+    'Content-Type': 'application/json',
+  },
+});
+
+/**
+ * Normalizes an Axios/unknown error into a short, human-readable string for
+ * toast/alert feedback (used by OperationsPage's trigger controls, where the
+ * user needs to know *why* a POST/PATCH failed, not a raw stack trace).
+ */
+export function getErrorMessage(error: unknown): string {
+  if (axios.isAxiosError(error)) {
+    const backendMessage =
+      (error.response?.data as { message?: string } | undefined)?.message;
+    if (backendMessage) return backendMessage;
+    if (error.response) {
+      return `Request failed: ${error.response.status} ${error.response.statusText}`;
+    }
+    if (error.request) {
+      return 'No response from server -- is the backend running on localhost:8080?';
+    }
+  }
+  if (error instanceof Error) return error.message;
+  return 'Unknown error';
+}
+
+/** SWR-compatible GET fetcher: `useSWR(key, fetcher)`. */
+export const fetcher = <T,>(url: string): Promise<T> =>
+  apiClient.get<T>(url).then((res) => res.data);
+</file>
+
+<file path="src/api/hooks.ts">
+import { useEffect, useState } from 'react';
+import useSWR from 'swr';
+import { fetcher } from './client';
+import type { ProductSearchResponse, UnifiedAnalyticsResponse } from '../types';
+
+/**
+ * Executive analytics feed -- GET /api/v1/analytics/unified
+ * (UnifiedAnalyticsController, UnifiedAnalyticsService). Polls every 3s so
+ * the live (Spark streaming) sections track the backend's 1-minute sliding
+ * window without a manual refresh -- refreshInterval is the whole mechanism,
+ * there is no websocket. The endpoint itself is server-side cached for 30s
+ * (@Cacheable in UnifiedAnalyticsService), so polling faster than that would
+ * just re-read the same cached snapshot.
+ */
+export function useUnifiedAnalytics() {
+  const { data, error, isLoading } = useSWR<UnifiedAnalyticsResponse>(
+    '/analytics/unified',
+    fetcher,
+    {
+      refreshInterval: 3000,
+      revalidateOnFocus: false,
+      keepPreviousData: true,
+    },
+  );
+
+  return {
+    analytics: data,
+    isLoading,
+    isError: Boolean(error),
+    error,
+  };
+}
+
+/** Delays updating the returned value until `value` has been stable for `delayMs`. */
+function useDebouncedValue<T>(value: T, delayMs: number): T {
+  const [debounced, setDebounced] = useState(value);
+
+  useEffect(() => {
+    const timer = setTimeout(() => setDebounced(value), delayMs);
+    return () => clearTimeout(timer);
+  }, [value, delayMs]);
+
+  return debounced;
+}
+
+/**
+ * Elasticsearch native search -- GET /api/v1/search/native/products
+ * (NativeSearchController, ProductSearchNativeService). Full-text relevance
+ * search (name^3, categoryName^2, fuzziness AUTO) returning full
+ * ProductDocument hits (salesCount/popularityScore/inStock included) plus
+ * category/price-range bucket aggregations.
+ *
+ * The raw keystroke value is debounced by 300ms before it becomes an SWR
+ * key, so typing doesn't fan out a request per keystroke. `categoryId` lets
+ * the UI filter by one of the returned categoryBuckets without a second
+ * round trip. Page/size are tracked here, client-side, rather than read
+ * back off the response -- see the ProductSearchResponse.page/size doc
+ * comment in types/index.ts for why.
+ */
+export function useProductSearch(query: string, categoryId: number | null, page = 0, size = 12) {
+  const debouncedQuery = useDebouncedValue(query.trim(), 300);
+
+  const shouldFetch = debouncedQuery.length > 0 || categoryId !== null;
+  const params = new URLSearchParams();
+  if (debouncedQuery) params.set('q', debouncedQuery);
+  if (categoryId !== null) params.set('categoryId', String(categoryId));
+  params.set('page', String(page));
+  params.set('size', String(size));
+
+  const key = shouldFetch ? `/search/native/products?${params.toString()}` : null;
+
+  const { data, error, isLoading } = useSWR<ProductSearchResponse>(key, fetcher, {
+    revalidateOnFocus: false,
+    keepPreviousData: true,
+  });
+
+  return {
+    hits: data?.hits ?? [],
+    totalHits: data?.totalHits ?? 0,
+    totalPages: data?.totalPages ?? 0,
+    categoryBuckets: data?.categoryBuckets ?? [],
+    priceRangeBuckets: data?.priceRangeBuckets ?? [],
+    isLoading: shouldFetch && isLoading,
+    isError: Boolean(error),
+    /** True while the user is mid-keystroke, before the debounce settles. */
+    isDebouncing: query.trim() !== debouncedQuery,
+  };
+}
+</file>
+
+<file path="src/components/layout/AppLayout.tsx">
+import type { ReactNode } from 'react';
+import { Sidebar } from './Sidebar';
+import { Header } from './Header';
+
+export function AppLayout({ children }: { children: ReactNode }) {
+  return (
+    <div className="min-h-screen bg-slate-50">
+      <Sidebar />
+      <div className="pl-60">
+        <Header />
+        <main className="px-8 py-6">{children}</main>
+      </div>
+    </div>
+  );
+}
+</file>
+
+<file path="src/components/layout/Header.tsx">
+import { useLocation } from 'react-router-dom';
+
+const PAGE_TITLES: Record<string, { title: string; description: string }> = {
+  '/': {
+    title: 'Dashboard',
+    description: 'Revenue and ranking signals across Spark and Postgres',
+  },
+  '/catalog': {
+    title: 'Catalog',
+    description: 'Live product search backed by Elasticsearch',
+  },
+  '/operations': {
+    title: 'Operations',
+    description: 'Trigger and verify backend event pipelines',
+  },
+};
+
+/** Top bar: page title derived from the current route, plus a live-stream indicator. */
+export function Header() {
+  const { pathname } = useLocation();
+  const page = PAGE_TITLES[pathname] ?? PAGE_TITLES['/'];
+
+  return (
+    <header className="sticky top-0 z-10 flex h-16 items-center justify-between border-b border-slate-200 bg-white/80 px-8 backdrop-blur">
+      <div>
+        <h1 className="text-base font-semibold text-slate-900">{page.title}</h1>
+        <p className="text-xs text-slate-500">{page.description}</p>
+      </div>
+
+      <div className="flex items-center gap-2 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1.5">
+        <span className="relative flex h-2 w-2">
+          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
+          <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500" />
+        </span>
+        <span className="text-xs font-medium text-emerald-700">Live stream connected</span>
+      </div>
+    </header>
+  );
+}
+</file>
+
+<file path="src/components/layout/Sidebar.tsx">
+import { NavLink } from 'react-router-dom';
+import { LayoutDashboard, Search, Settings, Activity } from 'lucide-react';
+import { cn } from '../../lib/utils';
+
+const NAV_ITEMS = [
+  { to: '/', label: 'Dashboard', icon: LayoutDashboard, end: true },
+  { to: '/catalog', label: 'Catalog', icon: Search, end: false },
+  { to: '/operations', label: 'Operations', icon: Settings, end: false },
+];
+
+/**
+ * Fixed left navigation. Dark against the app's light slate-50 canvas so
+ * it reads as a permanent instrument panel rather than another content
+ * panel -- the one deliberately "loud" surface in an otherwise quiet
+ * admin UI.
+ */
+export function Sidebar() {
+  return (
+    <aside className="fixed inset-y-0 left-0 z-20 flex w-60 flex-col bg-slate-900">
+      <div className="flex h-16 items-center gap-2.5 px-5">
+        <div className="flex h-8 w-8 items-center justify-center rounded-md bg-indigo-500">
+          <Activity className="h-4.5 w-4.5 text-white" strokeWidth={2.5} />
+        </div>
+        <div className="leading-tight">
+          <p className="text-sm font-semibold text-white">Commerce Ops</p>
+          <p className="text-xs text-slate-400">Event-driven console</p>
+        </div>
+      </div>
+
+      <nav className="flex-1 space-y-1 px-3 py-4">
+        {NAV_ITEMS.map(({ to, label, icon: Icon, end }) => (
+          <NavLink
+            key={to}
+            to={to}
+            end={end}
+            className={({ isActive }) =>
+              cn(
+                'flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors',
+                isActive
+                  ? 'bg-slate-800 text-white'
+                  : 'text-slate-400 hover:bg-slate-800/60 hover:text-slate-200',
+              )
+            }
+          >
+            <Icon className="h-4 w-4" />
+            {label}
+          </NavLink>
+        ))}
+      </nav>
+
+      <div className="border-t border-slate-800 px-5 py-4">
+        <p className="text-xs text-slate-500">Backed by Kafka, Spark and Elasticsearch</p>
+      </div>
+    </aside>
+  );
+}
+</file>
+
+<file path="src/components/ui/Badge.tsx">
+import type { HTMLAttributes } from 'react';
+import { cn } from '../../lib/utils';
+
+type BadgeVariant = 'success' | 'destructive' | 'neutral' | 'warning' | 'live';
+
+interface BadgeProps extends HTMLAttributes<HTMLSpanElement> {
+  variant?: BadgeVariant;
+}
+
+const VARIANT_CLASSES: Record<BadgeVariant, string> = {
+  success: 'bg-emerald-50 text-emerald-700 ring-1 ring-inset ring-emerald-200',
+  destructive: 'bg-rose-50 text-rose-700 ring-1 ring-inset ring-rose-200',
+  neutral: 'bg-slate-100 text-slate-600 ring-1 ring-inset ring-slate-200',
+  warning: 'bg-amber-50 text-amber-700 ring-1 ring-inset ring-amber-200',
+  live: 'bg-indigo-50 text-indigo-700 ring-1 ring-inset ring-indigo-200',
+};
+
+/**
+ * Small status pill. `success` / `destructive` map directly to the
+ * in-stock / out-of-stock states CatalogPage renders per product; `live`
+ * is used for the streaming-connection indicator in the header.
+ */
+export function Badge({ variant = 'neutral', className, children, ...props }: BadgeProps) {
+  return (
+    <span
+      className={cn(
+        'inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium',
+        VARIANT_CLASSES[variant],
+        className,
+      )}
+      {...props}
+    >
+      {children}
+    </span>
+  );
+}
+
+/** Convenience wrapper: renders the correct Badge for a product's stock state. */
+export function StockBadge({ inStock }: { inStock: boolean }) {
+  return (
+    <Badge variant={inStock ? 'success' : 'destructive'}>
+      <span
+        className={cn(
+          'h-1.5 w-1.5 rounded-full',
+          inStock ? 'bg-emerald-500' : 'bg-rose-500',
+        )}
+      />
+      {inStock ? 'In stock' : 'Out of stock'}
+    </Badge>
+  );
+}
+</file>
+
+<file path="src/components/ui/Button.tsx">
+import { type ButtonHTMLAttributes, forwardRef } from 'react';
+import { Loader2 } from 'lucide-react';
+import { cn } from '../../lib/utils';
+
+type ButtonVariant = 'primary' | 'secondary' | 'destructive' | 'ghost';
+type ButtonSize = 'sm' | 'md';
+
+interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
+  variant?: ButtonVariant;
+  size?: ButtonSize;
+  isLoading?: boolean;
+}
+
+const VARIANT_CLASSES: Record<ButtonVariant, string> = {
+  primary: 'bg-slate-900 text-white hover:bg-slate-800 focus-visible:outline-slate-900',
+  secondary:
+    'bg-white text-slate-700 border border-slate-300 hover:bg-slate-50 focus-visible:outline-slate-400',
+  destructive: 'bg-rose-600 text-white hover:bg-rose-500 focus-visible:outline-rose-600',
+  ghost: 'text-slate-600 hover:bg-slate-100 focus-visible:outline-slate-400',
+};
+
+const SIZE_CLASSES: Record<ButtonSize, string> = {
+  sm: 'px-3 py-1.5 text-sm',
+  md: 'px-4 py-2 text-sm',
+};
+
+/** Shared action button for operation triggers, filters and form submits. */
+export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
+  (
+    { variant = 'primary', size = 'md', isLoading, disabled, className, children, ...props },
+    ref,
+  ) => {
+    return (
+      <button
+        ref={ref}
+        disabled={disabled || isLoading}
+        className={cn(
+          'inline-flex items-center justify-center gap-2 rounded-md font-medium transition-colors',
+          'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2',
+          'disabled:cursor-not-allowed disabled:opacity-60',
+          VARIANT_CLASSES[variant],
+          SIZE_CLASSES[size],
+          className,
+        )}
+        {...props}
+      >
+        {isLoading && <Loader2 className="h-4 w-4 animate-spin" />}
+        {children}
+      </button>
+    );
+  },
+);
+
+Button.displayName = 'Button';
+</file>
+
+<file path="src/components/ui/Card.tsx">
+import type { HTMLAttributes, ReactNode } from 'react';
+import { cn } from '../../lib/utils';
+
+type AccentColor = 'indigo' | 'emerald' | 'slate' | 'rose' | 'amber' | 'none';
+
+const ACCENT_CLASSES: Record<AccentColor, string> = {
+  indigo: 'border-l-indigo-500',
+  emerald: 'border-l-emerald-500',
+  slate: 'border-l-slate-400',
+  rose: 'border-l-rose-500',
+  amber: 'border-l-amber-500',
+  none: 'border-l-transparent',
+};
+
+interface CardProps extends HTMLAttributes<HTMLDivElement> {
+  /**
+   * Thin left-edge accent bar used to signal a card's data domain at a
+   * glance (indigo = live/streaming, emerald = catalog/stock,
+   * slate = historical/batch) instead of giving every card an identical
+   * shadow with no hierarchy between them.
+   */
+  accent?: AccentColor;
+}
+
+export function Card({ accent = 'none', className, children, ...props }: CardProps) {
+  return (
+    <div
+      className={cn(
+        'rounded-lg border border-slate-200 bg-white',
+        accent !== 'none' && 'border-l-4',
+        ACCENT_CLASSES[accent],
+        className,
+      )}
+      {...props}
+    >
+      {children}
+    </div>
+  );
+}
+
+export function CardHeader({
+  title,
+  description,
+  action,
+  className,
+}: {
+  title: string;
+  description?: string;
+  action?: ReactNode;
+  className?: string;
+}) {
+  return (
+    <div className={cn('flex items-start justify-between gap-4 px-5 pt-5', className)}>
+      <div>
+        <h3 className="text-sm font-semibold text-slate-900">{title}</h3>
+        {description && <p className="mt-0.5 text-sm text-slate-500">{description}</p>}
+      </div>
+      {action}
+    </div>
+  );
+}
+
+export function CardBody({ className, children }: { className?: string; children: ReactNode }) {
+  return <div className={cn('p-5', className)}>{children}</div>;
+}
+</file>
+
+<file path="src/components/ui/Table.tsx">
+import type { HTMLAttributes, TdHTMLAttributes, ThHTMLAttributes } from 'react';
+import { cn } from '../../lib/utils';
+
+export function Table({ className, ...props }: HTMLAttributes<HTMLTableElement>) {
+  return (
+    <div className="overflow-x-auto">
+      <table className={cn('w-full border-collapse text-sm', className)} {...props} />
+    </div>
+  );
+}
+
+export function TableHead({ className, ...props }: HTMLAttributes<HTMLTableSectionElement>) {
+  return <thead className={cn('border-b border-slate-200', className)} {...props} />;
+}
+
+export function TableBody({ className, ...props }: HTMLAttributes<HTMLTableSectionElement>) {
+  return <tbody className={cn('divide-y divide-slate-100', className)} {...props} />;
+}
+
+export function TableRow({ className, ...props }: HTMLAttributes<HTMLTableRowElement>) {
+  return <tr className={cn('transition-colors hover:bg-slate-50', className)} {...props} />;
+}
+
+export function TableHeaderCell({
+  className,
+  ...props
+}: ThHTMLAttributes<HTMLTableCellElement>) {
+  return (
+    <th
+      className={cn(
+        'px-4 py-3 text-left text-xs font-medium text-slate-500',
+        className,
+      )}
+      {...props}
+    />
+  );
+}
+
+export function TableCell({ className, ...props }: TdHTMLAttributes<HTMLTableCellElement>) {
+  return <td className={cn('px-4 py-3 text-slate-700', className)} {...props} />;
+}
+</file>
+
+<file path="src/lib/utils.ts">
+import { type ClassValue, clsx } from 'clsx';
+import { twMerge } from 'tailwind-merge';
+
+/**
+ * Standard clsx + tailwind-merge combinator. Used throughout components/ui
+ * so variant classes and caller-supplied `className` overrides compose
+ * safely instead of producing duplicate/conflicting Tailwind utilities.
+ */
+export function cn(...inputs: ClassValue[]): string {
+  return twMerge(clsx(inputs));
+}
+</file>
+
+<file path="src/pages/CatalogPage.tsx">
+import { useState } from 'react';
+import { Search, PackageSearch, Flame } from 'lucide-react';
+import { useProductSearch } from '../api/hooks';
+import { Card, CardBody } from '../components/ui/Card';
+import { StockBadge } from '../components/ui/Badge';
+import { cn } from '../lib/utils';
+import { formatCompactNumber } from '../utils/formatters';
+
+export function CatalogPage() {
+  const [query, setQuery] = useState('');
+  const [categoryId, setCategoryId] = useState<number | null>(null);
+  const { hits, totalHits, categoryBuckets, isLoading, isDebouncing } = useProductSearch(
+    query,
+    categoryId,
+  );
+
+  const showResults = query.trim().length > 0 || categoryId !== null;
+  const showSpinner = isDebouncing || isLoading;
+
+  return (
+    <div className="space-y-6">
+      <div className="relative">
+        <Search className="pointer-events-none absolute left-4 top-1/2 h-5 w-5 -translate-y-1/2 text-slate-400" />
+        <input
+          type="text"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search products by name -- typo-tolerant, backed by Elasticsearch"
+          className="w-full rounded-lg border border-slate-200 bg-white py-4 pl-12 pr-12 text-base text-slate-900 shadow-sm outline-none transition-shadow placeholder:text-slate-400 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-50"
+        />
+        {showSpinner && (
+          <div className="absolute right-4 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin rounded-full border-2 border-slate-300 border-t-indigo-500" />
+        )}
+      </div>
+
+      {/* Category facet, built from this same response's categoryBuckets aggregation --
+          only renders once a search has actually returned buckets to filter by. */}
+      {categoryBuckets.length > 0 && (
+        <div className="flex flex-wrap gap-2">
+          <button
+            onClick={() => setCategoryId(null)}
+            className={cn(
+              'rounded-full border px-3 py-1 text-xs font-medium transition-colors',
+              categoryId === null
+                ? 'border-slate-900 bg-slate-900 text-white'
+                : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300',
+            )}
+          >
+            All categories
+          </button>
+          {categoryBuckets.map((bucket) => (
+            <button
+              key={bucket.categoryId}
+              onClick={() => setCategoryId(bucket.categoryId)}
+              className={cn(
+                'rounded-full border px-3 py-1 text-xs font-medium transition-colors',
+                categoryId === bucket.categoryId
+                  ? 'border-slate-900 bg-slate-900 text-white'
+                  : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300',
+              )}
+            >
+              Category {bucket.categoryId}
+              <span className="ml-1 opacity-60">({bucket.docCount})</span>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {!showResults && (
+        <Card>
+          <CardBody className="flex flex-col items-center gap-2 py-16 text-center">
+            <PackageSearch className="h-8 w-8 text-slate-300" />
+            <p className="text-sm text-slate-500">
+              Start typing to search the live product catalog.
+            </p>
+          </CardBody>
+        </Card>
+      )}
+
+      {showResults && !isLoading && hits.length === 0 && (
+        <Card>
+          <CardBody className="flex flex-col items-center gap-2 py-16 text-center">
+            <PackageSearch className="h-8 w-8 text-slate-300" />
+            <p className="text-sm text-slate-500">
+              {query.trim() ? `No products match "${query.trim()}".` : 'No products in this category.'}
+            </p>
+          </CardBody>
+        </Card>
+      )}
+
+      {showResults && hits.length > 0 && (
+        <>
+          <p className="text-sm text-slate-500">
+            {totalHits} {totalHits === 1 ? 'result' : 'results'}
+          </p>
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+            {hits.map((product) => (
+              <Card key={product.id} className="transition-shadow hover:shadow-md">
+                <CardBody className="space-y-3">
+                  <div className="flex items-start justify-between gap-2">
+                    <h3 className="text-sm font-semibold leading-snug text-slate-900">
+                      {product.name}
+                    </h3>
+                    <StockBadge inStock={product.inStock} />
+                  </div>
+
+                  <div className="flex items-center justify-between border-t border-slate-100 pt-3">
+                    <div>
+                      <p className="text-xs text-slate-400">Sales</p>
+                      <p className="font-mono text-lg font-semibold text-slate-900">
+                        {formatCompactNumber(product.salesCount)}
+                      </p>
+                    </div>
+                    <div className="text-right">
+                      <p className="flex items-center justify-end gap-1 text-xs text-slate-400">
+                        <Flame className="h-3 w-3" />
+                        Popularity
+                      </p>
+                      <p className="font-mono text-sm text-slate-600">
+                        {product.popularityScore.toFixed(2)}
+                      </p>
+                    </div>
+                  </div>
+                </CardBody>
+              </Card>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+</file>
+
+<file path="src/pages/DashboardPage.tsx">
+import {
+  Area,
+  AreaChart,
+  Bar,
+  BarChart,
+  CartesianGrid,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts';
+import type { ReactNode } from 'react';
+import { TrendingUp, Radio, Users, UserCheck, Tag, DatabaseZap } from 'lucide-react';
+import { useUnifiedAnalytics } from '../api/hooks';
+import { Card, CardBody, CardHeader } from '../components/ui/Card';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeaderCell,
+  TableRow,
+} from '../components/ui/Table';
+import { formatCompactNumber, formatCurrency, formatDayLabel, formatFullTimestamp, formatWindowTime } from '../utils/formatters';
+import type { ProductPerformanceRow, SectionMeta, SparkSection } from '../types';
+
+function ChartTooltip({
+  active,
+  payload,
+  labelFormatter,
+  valueKey,
+}: {
+  active?: boolean;
+  payload?: { value: number; payload: Record<string, unknown> }[];
+  labelFormatter: (point: Record<string, unknown>) => string;
+  valueKey: string;
+}) {
+  if (!active || !payload?.length) return null;
+  const point = payload[0].payload;
+  return (
+    <div className="rounded-md border border-slate-200 bg-white px-3 py-2 text-xs shadow-sm">
+      <p className="font-medium text-slate-900">{labelFormatter(point)}</p>
+      <p className="text-slate-500">{formatCurrency(Number(point[valueKey]))}</p>
+    </div>
+  );
+}
+
+/** Spark rows come back newest-first (ORDER BY ... DESC LIMIT); charts need oldest-first, left to right. */
+function chronological<T>(rows: T[]): T[] {
+  return [...rows].reverse();
+}
+
+/**
+ * Every section of UnifiedAnalyticsResponse carries its own status: OK
+ * (has data), EMPTY (job ran, table has no rows yet), or UNAVAILABLE (the
+ * owning Spark job has never run -- the table doesn't exist). Surfacing
+ * that distinction matters here: an UNAVAILABLE chart means "run the Spark
+ * job", not "something is broken."
+ */
+function SectionNotice({ meta, jobHint }: { meta: SectionMeta; jobHint: string }) {
+  if (meta.status === 'UNAVAILABLE') {
+    return (
+      <div className="flex h-[260px] flex-col items-center justify-center gap-1 text-center">
+        <DatabaseZap className="h-6 w-6 text-slate-300" />
+        <p className="text-sm text-slate-500">Not available yet.</p>
+        <p className="text-xs text-slate-400">{jobHint}</p>
+      </div>
+    );
+  }
+  return (
+    <div className="flex h-[260px] items-center justify-center text-sm text-slate-400">
+      No rows yet.
+    </div>
+  );
+}
+
+function StatTile({
+  icon,
+  label,
+  value,
+}: {
+  icon: ReactNode;
+  label: string;
+  value: string;
+}) {
+  return (
+    <Card>
+      <CardBody className="flex items-center gap-3">
+        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-slate-100 text-slate-500">
+          {icon}
+        </div>
+        <div>
+          <p className="text-xs text-slate-500">{label}</p>
+          <p className="font-mono text-lg font-semibold text-slate-900">{value}</p>
+        </div>
+      </CardBody>
+    </Card>
+  );
+}
+
+export function DashboardPage() {
+  const { analytics, isLoading, isError } = useUnifiedAnalytics();
+
+  if (isError) {
+    return (
+      <Card accent="rose">
+        <CardBody>
+          <p className="text-sm text-slate-700">
+            Couldn't reach the analytics backend. Confirm the Spring Boot API is running on{' '}
+            <code className="rounded bg-slate-100 px-1 py-0.5 font-mono text-xs">
+              localhost:8080
+            </code>{' '}
+            and retry.
+          </p>
+        </CardBody>
+      </Card>
+    );
+  }
+
+  const latestOrderWindow = analytics?.liveOrderActivity.rows[0];
+
+  return (
+    <div className="space-y-6">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <StatTile
+          icon={<Users className="h-4 w-4" />}
+          label="Customers"
+          value={analytics ? formatCompactNumber(analytics.customerSummary.totalCustomers) : '—'}
+        />
+        <StatTile
+          icon={<UserCheck className="h-4 w-4" />}
+          label="With paid orders"
+          value={
+            analytics ? formatCompactNumber(analytics.customerSummary.customersWithPaidOrders) : '—'
+          }
+        />
+        <StatTile
+          icon={<Tag className="h-4 w-4" />}
+          label="Categories"
+          value={analytics ? formatCompactNumber(analytics.customerSummary.totalCategories) : '—'}
+        />
+        <StatTile
+          icon={<Radio className="h-4 w-4" />}
+          label="Orders (last window)"
+          value={latestOrderWindow ? formatCompactNumber(latestOrderWindow.orders_created) : '—'}
+        />
+      </div>
+
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+        <Card accent="emerald">
+          <CardHeader
+            title="Live revenue stream"
+            description="Spark streaming, paid revenue per sliding window (spark_streaming_revenue)"
+            action={<Radio className="h-4 w-4 text-emerald-500" />}
+          />
+          <CardBody>
+            {isLoading && !analytics ? (
+              <ChartSkeleton />
+            ) : analytics && analytics.livePaidRevenue.meta.status !== 'OK' ? (
+              <SectionNotice
+                meta={analytics.livePaidRevenue.meta}
+                jobHint="Start spark-streaming (run-streaming.sh) to populate this."
+              />
+            ) : (
+              <ResponsiveContainer width="100%" height={260}>
+                <AreaChart data={chronological(analytics?.livePaidRevenue.rows ?? [])}>
+                  <defs>
+                    <linearGradient id="liveRevenueGradient" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor="#10b981" stopOpacity={0.35} />
+                      <stop offset="100%" stopColor="#10b981" stopOpacity={0} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid vertical={false} stroke="#e2e8f0" />
+                  <XAxis
+                    dataKey="window_start"
+                    tickFormatter={formatWindowTime}
+                    tick={{ fontSize: 11, fill: '#64748b' }}
+                    axisLine={{ stroke: '#e2e8f0' }}
+                    tickLine={false}
+                  />
+                  <YAxis
+                    tickFormatter={(v) => formatCompactNumber(v)}
+                    tick={{ fontSize: 11, fill: '#64748b' }}
+                    axisLine={false}
+                    tickLine={false}
+                    width={44}
+                  />
+                  <Tooltip
+                    content={
+                      <ChartTooltip
+                        valueKey="paid_revenue"
+                        labelFormatter={(p) =>
+                          typeof p.window_start === 'string' ? formatFullTimestamp(p.window_start) : ''
+                        }
+                      />
+                    }
+                  />
+                  <Area
+                    type="monotone"
+                    dataKey="paid_revenue"
+                    stroke="#10b981"
+                    strokeWidth={2}
+                    fill="url(#liveRevenueGradient)"
+                  />
+                </AreaChart>
+              </ResponsiveContainer>
+            )}
+          </CardBody>
+        </Card>
+
+        <Card accent="slate">
+          <CardHeader
+            title="Historical trend"
+            description="Spark batch, daily revenue (spark_batch_revenue_trend)"
+            action={<TrendingUp className="h-4 w-4 text-slate-400" />}
+          />
+          <CardBody>
+            {isLoading && !analytics ? (
+              <ChartSkeleton />
+            ) : analytics && analytics.revenueTrend.meta.status !== 'OK' ? (
+              <SectionNotice
+                meta={analytics.revenueTrend.meta}
+                jobHint="Run the Spark batch job (run-batch.sh) to populate this."
+              />
+            ) : (
+              <ResponsiveContainer width="100%" height={260}>
+                <BarChart data={chronological(analytics?.revenueTrend.rows ?? [])}>
+                  <CartesianGrid vertical={false} stroke="#e2e8f0" />
+                  <XAxis
+                    dataKey="day"
+                    tickFormatter={formatDayLabel}
+                    tick={{ fontSize: 11, fill: '#64748b' }}
+                    axisLine={{ stroke: '#e2e8f0' }}
+                    tickLine={false}
+                  />
+                  <YAxis
+                    tickFormatter={(v) => formatCompactNumber(v)}
+                    tick={{ fontSize: 11, fill: '#64748b' }}
+                    axisLine={false}
+                    tickLine={false}
+                    width={44}
+                  />
+                  <Tooltip
+                    content={
+                      <ChartTooltip
+                        valueKey="revenue"
+                        labelFormatter={(p) => (typeof p.day === 'string' ? formatDayLabel(p.day) : '')}
+                      />
+                    }
+                    cursor={{ fill: '#f1f5f9' }}
+                  />
+                  <Bar dataKey="revenue" fill="#475569" radius={[4, 4, 0, 0]} maxBarSize={36} />
+                </BarChart>
+              </ResponsiveContainer>
+            )}
+          </CardBody>
+        </Card>
+      </div>
+
+      <Card accent="indigo">
+        <CardHeader
+          title="Top products by revenue"
+          description="Spark batch, PAID orders only (spark_batch_product_performance) -- not live Elasticsearch ranking signals, see Catalog for those"
+        />
+        <CardBody className="p-0">
+          <TopProductsTable section={analytics?.productPerformance} isLoading={isLoading} />
+        </CardBody>
+      </Card>
+    </div>
+  );
+}
+
+function TopProductsTable({
+  section,
+  isLoading,
+}: {
+  section?: SparkSection<ProductPerformanceRow>;
+  isLoading: boolean;
+}) {
+  if (isLoading && !section) {
+    return <div className="p-8 text-center text-sm text-slate-400">Loading top products...</div>;
+  }
+  if (section && section.meta.status !== 'OK') {
+    return (
+      <SectionNotice
+        meta={section.meta}
+        jobHint="Run the Spark batch job (run-batch.sh) to populate this."
+      />
+    );
+  }
+
+  return (
+    <Table>
+      <TableHead>
+        <TableRow>
+          <TableHeaderCell>Product</TableHeaderCell>
+          <TableHeaderCell className="text-right">Units sold</TableHeaderCell>
+          <TableHeaderCell className="text-right">Orders</TableHeaderCell>
+          <TableHeaderCell className="text-right">Revenue</TableHeaderCell>
+        </TableRow>
+      </TableHead>
+      <TableBody>
+        {section?.rows.map((row) => (
+          <TableRow key={row.product_id}>
+            <TableCell className="font-medium text-slate-900">{row.product_name}</TableCell>
+            <TableCell className="text-right font-mono text-xs text-slate-600">
+              {formatCompactNumber(row.units_sold)}
+            </TableCell>
+            <TableCell className="text-right font-mono text-xs text-slate-600">
+              {formatCompactNumber(row.order_count)}
+            </TableCell>
+            <TableCell className="text-right font-mono text-xs text-slate-600">
+              {formatCurrency(row.revenue)}
+            </TableCell>
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
+  );
+}
+
+function ChartSkeleton() {
+  return <div className="h-[260px] animate-pulse rounded-md bg-slate-100" />;
+}
+</file>
+
+<file path="src/pages/OperationsPage.tsx">
+import { useState, type ReactNode } from 'react';
+import {
+  PlayCircle,
+  RefreshCw,
+  PackageX,
+  Ban,
+  CheckCircle2,
+  XCircle,
+  X,
+} from 'lucide-react';
+import { apiClient, getErrorMessage } from '../api/client';
+import { Card, CardBody, CardHeader } from '../components/ui/Card';
+import { Button } from '../components/ui/Button';
+import { cn } from '../lib/utils';
+import type { PopularitySyncResponse, SimulatorStatus } from '../types';
+
+interface Toast {
+  id: number;
+  kind: 'success' | 'error';
+  message: string;
+}
+
+let toastSeq = 0;
+
+function useToasts() {
+  const [toasts, setToasts] = useState<Toast[]>([]);
+
+  function push(kind: Toast['kind'], message: string) {
+    const id = ++toastSeq;
+    setToasts((current) => [...current, { id, kind, message }]);
+    setTimeout(() => {
+      setToasts((current) => current.filter((t) => t.id !== id));
+    }, 5000);
+  }
+
+  function dismiss(id: number) {
+    setToasts((current) => current.filter((t) => t.id !== id));
+  }
+
+  return { toasts, push, dismiss };
+}
+
+function ToastStack({ toasts, dismiss }: { toasts: Toast[]; dismiss: (id: number) => void }) {
+  return (
+    <div className="fixed bottom-6 right-6 z-50 flex w-80 flex-col gap-2">
+      {toasts.map((toast) => (
+        <div
+          key={toast.id}
+          className={cn(
+            'flex items-start gap-2 rounded-lg border px-4 py-3 shadow-lg',
+            toast.kind === 'success'
+              ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+              : 'border-rose-200 bg-rose-50 text-rose-800',
+          )}
+        >
+          {toast.kind === 'success' ? (
+            <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />
+          ) : (
+            <XCircle className="mt-0.5 h-4 w-4 shrink-0" />
+          )}
+          <p className="flex-1 text-sm">{toast.message}</p>
+          <button onClick={() => dismiss(toast.id)} aria-label="Dismiss">
+            <X className="h-3.5 w-3.5 opacity-60 hover:opacity-100" />
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ActionCard({
+  icon,
+  accent,
+  title,
+  description,
+  children,
+}: {
+  icon: ReactNode;
+  accent: 'indigo' | 'emerald' | 'amber' | 'rose';
+  title: string;
+  description: string;
+  children: ReactNode;
+}) {
+  return (
+    <Card accent={accent}>
+      <CardHeader title={title} description={description} action={icon} />
+      <CardBody>{children}</CardBody>
+    </Card>
+  );
+}
+
+export function OperationsPage() {
+  const { toasts, push, dismiss } = useToasts();
+
+  const [simulatorLoading, setSimulatorLoading] = useState(false);
+  const [syncLoading, setSyncLoading] = useState(false);
+  const [stockProductId, setStockProductId] = useState('');
+  const [stockLoading, setStockLoading] = useState(false);
+  const [orderId, setOrderId] = useState('');
+  const [cancelLoading, setCancelLoading] = useState(false);
+
+  async function runSimulatorStart() {
+    setSimulatorLoading(true);
+    try {
+      // POST body is optional (SimulatorStartRequest, @RequestBody(required = false));
+      // omitting it falls back to the app.simulator.* config defaults.
+      const { data } = await apiClient.post<SimulatorStatus>('/simulator/start');
+      push(
+        'success',
+        `Simulator running -- target ${data.targetIterations} iterations, ${data.actionsCompleted} completed so far.`,
+      );
+    } catch (error) {
+      push('error', getErrorMessage(error));
+    } finally {
+      setSimulatorLoading(false);
+    }
+  }
+
+  async function runPopularitySync() {
+    setSyncLoading(true);
+    try {
+      const { data } = await apiClient.post<PopularitySyncResponse>('/search/admin/sync/popularity');
+      if (data.sourceStatus !== 'AVAILABLE') {
+        push(
+          'error',
+          `Spark batch popularity table is ${data.sourceStatus.toLowerCase()} -- run the Spark batch job first.`,
+        );
+      } else {
+        push('success', `Synced popularityScore for ${data.productsUpdated} products to Elasticsearch.`);
+      }
+    } catch (error) {
+      push('error', getErrorMessage(error));
+    } finally {
+      setSyncLoading(false);
+    }
+  }
+
+  async function runToggleStock(inStock: boolean) {
+    const id = stockProductId.trim();
+    if (!id) {
+      push('error', 'Enter a product ID first.');
+      return;
+    }
+    setStockLoading(true);
+    try {
+      await apiClient.patch(`/search/admin/products/${id}/availability`, null, {
+        params: { inStock },
+      });
+      push('success', `Product ${id} marked ${inStock ? 'in stock' : 'out of stock'}.`);
+    } catch (error) {
+      push('error', getErrorMessage(error));
+    } finally {
+      setStockLoading(false);
+    }
+  }
+
+  async function runCancelOrder() {
+    const id = orderId.trim();
+    if (!id) {
+      push('error', 'Enter an order ID first.');
+      return;
+    }
+    setCancelLoading(true);
+    try {
+      await apiClient.patch(`/orders/${id}/status`, null, {
+        params: { status: 'CANCELLED' },
+      });
+      push('success', `Order ${id} cancelled -- salesCount will be decremented.`);
+    } catch (error) {
+      push('error', getErrorMessage(error));
+    } finally {
+      setCancelLoading(false);
+    }
+  }
+
+  return (
+    <div className="space-y-6">
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+        <ActionCard
+          icon={<PlayCircle className="h-4 w-4 text-indigo-500" />}
+          accent="indigo"
+          title="Order simulator"
+          description="Publish synthetic ORDER_CREATED events onto the Kafka topic"
+        >
+          <Button onClick={runSimulatorStart} isLoading={simulatorLoading}>
+            Start simulator
+          </Button>
+        </ActionCard>
+
+        <ActionCard
+          icon={<RefreshCw className="h-4 w-4 text-emerald-500" />}
+          accent="emerald"
+          title="Spark popularity sync"
+          description="Push the latest time-decayed popularityScore batch into Elasticsearch"
+        >
+          <Button onClick={runPopularitySync} isLoading={syncLoading} variant="secondary">
+            Sync now
+          </Button>
+        </ActionCard>
+
+        <ActionCard
+          icon={<PackageX className="h-4 w-4 text-amber-500" />}
+          accent="amber"
+          title="Toggle stock status"
+          description="Flip a product's inStock flag directly in the search index"
+        >
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={stockProductId}
+              onChange={(e) => setStockProductId(e.target.value)}
+              placeholder="Product ID"
+              className="flex-1 rounded-md border border-slate-300 px-3 py-2 text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-50"
+            />
+            <Button
+              variant="secondary"
+              isLoading={stockLoading}
+              onClick={() => runToggleStock(true)}
+            >
+              Mark in stock
+            </Button>
+            <Button
+              variant="destructive"
+              isLoading={stockLoading}
+              onClick={() => runToggleStock(false)}
+            >
+              Mark out
+            </Button>
+          </div>
+        </ActionCard>
+
+        <ActionCard
+          icon={<Ban className="h-4 w-4 text-rose-500" />}
+          accent="rose"
+          title="Cancel order"
+          description="Trigger the compensating transaction that decrements salesCount"
+        >
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={orderId}
+              onChange={(e) => setOrderId(e.target.value)}
+              placeholder="Order ID"
+              className="flex-1 rounded-md border border-slate-300 px-3 py-2 text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-50"
+            />
+            <Button variant="destructive" isLoading={cancelLoading} onClick={runCancelOrder}>
+              Cancel order
+            </Button>
+          </div>
+        </ActionCard>
+      </div>
+
+      <ToastStack toasts={toasts} dismiss={dismiss} />
+    </div>
+  );
+}
+</file>
+
+<file path="src/types/index.ts">
+/**
+ * All types below are transcribed directly from the backend source
+ * (repomix-output.xml) -- every field name, nesting level and endpoint path
+ * referenced in api/client.ts and api/hooks.ts was checked against the
+ * actual Java record/controller it comes from. File references are noted
+ * per section so a future backend change is easy to re-verify against.
+ */
+
+// ---------------------------------------------------------------------------
+// Elasticsearch: ProductDocument
+// src/main/java/com/ecommerce/analytics/elasticsearch/document/ProductDocument.java
+// This is the FULL document shape returned by native search hits -- it is
+// the only place salesCount/popularityScore/inStock live. It does NOT
+// appear anywhere in UnifiedAnalyticsResponse (see note on that below).
+// ---------------------------------------------------------------------------
+export interface ProductDocument {
+  id: number;
+  name: string;
+  price: number;
+  categoryId: number | null;
+  categoryName: string | null;
+  averageRating: number | null;
+  reviewCount: number | null;
+  salesCount: number;
+  popularityScore: number;
+  inStock: boolean;
+  createdAt: string;
+  lastEventOccurredAt: string | null;
+  lastEventId: string | null;
+  updatedAt: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/search/native/products -> ProductSearchResponse
+// src/main/java/com/ecommerce/analytics/dto/search/ProductSearchResponse.java
+// src/main/java/com/ecommerce/analytics/controller/search/NativeSearchController.java
+//
+// IMPORTANT backend quirk (flagged, not "fixed" here -- this is what the API
+// actually returns): the native-search path always constructs
+// ProductSearchResponse via its "Secondary constructor for Native Search
+// calls", which hardcodes page=0 and size=10 in the response body
+// regardless of the page/size you actually requested. Do NOT read
+// pagination state back off this response -- track the requested page/size
+// client-side instead (see useProductSearch).
+// ---------------------------------------------------------------------------
+export interface CategoryBucket {
+  categoryId: number;
+  docCount: number;
+}
+
+export interface PriceRangeBucket {
+  label: string;
+  docCount: number;
+}
+
+export interface ProductSearchResponse {
+  hits: ProductDocument[];
+  totalHits: number;
+  totalPages: number;
+  categoryBuckets: CategoryBucket[];
+  priceRangeBuckets: PriceRangeBucket[];
+  /** Always 0 on the native-search endpoint -- see note above. Not used for UI state. */
+  page: number;
+  /** Always 10 on the native-search endpoint -- see note above. Not used for UI state. */
+  size: number;
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/analytics/unified -> UnifiedAnalyticsResponse
+// src/main/java/com/ecommerce/analytics/dto/analytics/unified/*.java
+// src/main/java/com/ecommerce/analytics/service/UnifiedAnalyticsService.java
+//
+// This endpoint composes Spring (customerSummary), Spark batch (revenueTrend/
+// productPerformance/categoryPerformance/geoPerformance) and Spark streaming
+// (liveEventCounts/liveOrderActivity/livePaidRevenue) sections. It does NOT
+// include anything from Elasticsearch -- confirmed by the backend's own
+// comment on ProductSearchController: "Elasticsearch was NOT folded into
+// GET /api/v1/analytics/unified". So the dashboard's "top products" table
+// below is Spark's productPerformance (units_sold/revenue from Postgres),
+// not live ES salesCount/popularityScore/inStock -- those three fields only
+// ever come from /search/native/products (CatalogPage).
+//
+// Every section is wrapped: { meta: {source, status, asOf}, rows: [...] }.
+// `rows` is a raw SELECT * projection off a Spark-written Postgres table
+// (ResultSet -> Map<String,Object> -> JSON), so keys are the exact snake_case
+// column/alias names from the SQL -- not camelCase, not renamed.
+// ---------------------------------------------------------------------------
+export type DataSource = 'SPARK_BATCH' | 'SPARK_STREAMING' | 'SPRING';
+export type SectionStatus = 'OK' | 'EMPTY' | 'UNAVAILABLE';
+
+export interface SectionMeta {
+  source: DataSource;
+  status: SectionStatus;
+  /** ISO instant, or null for EMPTY/UNAVAILABLE sections (and for non-windowed batch sections, which never set it). */
+  asOf: string | null;
+}
+
+export interface SparkSection<TRow> {
+  meta: SectionMeta;
+  rows: TRow[];
+}
+
+/** spark_batch_revenue_trend -- BatchAnalytics.dailyRevenueTrend */
+export interface RevenueTrendRow {
+  day: string;
+  order_count: number;
+  paid_order_count: number;
+  revenue: number;
+}
+
+/** spark_batch_product_performance -- BatchAnalytics.productPerformance (PAID orders only) */
+export interface ProductPerformanceRow {
+  product_id: number;
+  product_name: string;
+  category_id: number | null;
+  units_sold: number;
+  revenue: number;
+  order_count: number;
+}
+
+/** spark_batch_category_performance -- BatchAnalytics.categoryPerformance */
+export interface CategoryPerformanceRow {
+  category_id: number;
+  category_name: string;
+  product_count: number;
+  units_sold: number;
+  revenue: number;
+}
+
+/** spark_batch_geo_performance -- BatchAnalytics.geoPerformance */
+export interface GeoPerformanceRow {
+  country: string;
+  city: string;
+  order_count: number;
+  paid_order_count: number;
+  revenue: number;
+}
+
+/** spark_streaming_event_counts -- StreamingAnalytics.eventCountsByWindow (1-minute sliding window) */
+export interface EventCountRow {
+  window_start: string;
+  window_end: string;
+  event_type: string;
+  event_count: number;
+}
+
+/** spark_streaming_order_activity -- StreamingAnalytics.orderActivityByWindow, ORDER_CREATED events only */
+export interface OrderActivityRow {
+  window_start: string;
+  window_end: string;
+  orders_created: number;
+  gross_amount: number;
+}
+
+/** spark_streaming_revenue -- StreamingAnalytics.paidRevenueByWindow, PAYMENT_CREATED/PAID events only */
+export interface PaidRevenueRow {
+  window_start: string;
+  window_end: string;
+  paid_count: number;
+  paid_revenue: number;
+}
+
+export interface CustomerSummarySection {
+  meta: SectionMeta;
+  totalCustomers: number;
+  customersWithPaidOrders: number;
+  totalCategories: number;
+}
+
+export interface UnifiedAnalyticsResponse {
+  generatedAt: string;
+  customerSummary: CustomerSummarySection;
+  revenueTrend: SparkSection<RevenueTrendRow>;
+  productPerformance: SparkSection<ProductPerformanceRow>;
+  categoryPerformance: SparkSection<CategoryPerformanceRow>;
+  geoPerformance: SparkSection<GeoPerformanceRow>;
+  liveEventCounts: SparkSection<EventCountRow>;
+  liveOrderActivity: SparkSection<OrderActivityRow>;
+  livePaidRevenue: SparkSection<PaidRevenueRow>;
+}
+
+// ---------------------------------------------------------------------------
+// Operations page: admin trigger endpoints
+// ---------------------------------------------------------------------------
+
+/** POST /api/v1/simulator/start, /stop, GET /status -- simulator/dto/SimulatorStatus.java */
+export interface SimulatorStatus {
+  running: boolean;
+  enabled: boolean;
+  actionsCompleted: number;
+  actionsFailed: number;
+  targetIterations: number;
+  historicalCutoff: string;
+  startedAt: string | null;
+  actionCounts: Record<string, number>;
+  lastError: string | null;
+}
+
+/** POST /api/v1/search/admin/sync/popularity -- dto/search/PopularitySyncResponse.java */
+export interface PopularitySyncResponse {
+  sourceStatus: string;
+  productsUpdated: number;
+}
+
+/** POST /api/v1/search/admin/reindex/products -- dto/search/BackfillResponse.java (not wired into the UI yet, typed for completeness) */
+export interface BackfillResponse {
+  productsIndexed: number;
+  pagesProcessed: number;
+  targetIndex: string | null;
+}
+
+/** entity/OrderStatus.java */
+export type OrderStatus = 'PENDING' | 'CONFIRMED' | 'PROCESSING' | 'SHIPPED' | 'DELIVERED' | 'CANCELLED';
+</file>
+
+<file path="src/utils/formatters.ts">
+import { format } from 'date-fns';
+
+/**
+ * USD currency formatter for revenue figures (Spark trend/live-window
+ * values). Whole-dollar precision -- these are aggregate revenue sums, not
+ * unit prices, so cents are noise at this scale.
+ */
+export function formatCurrency(value: number): string {
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    maximumFractionDigits: 0,
+  }).format(value);
+}
+
+/**
+ * Compact number formatter for high-cardinality counters (salesCount,
+ * popularityScore) -- e.g. 5200 -> "5.2K", 1_300_000 -> "1.3M".
+ */
+export function formatCompactNumber(value: number): string {
+  return new Intl.NumberFormat('en-US', {
+    notation: 'compact',
+    maximumFractionDigits: 1,
+  }).format(value);
+}
+
+/** Axis/table label for a Spark batch trend day, e.g. "2026-10-06" -> "Oct 6". */
+export function formatDayLabel(isoDay: string): string {
+  try {
+    return format(new Date(isoDay), 'MMM d');
+  } catch {
+    return isoDay;
+  }
+}
+
+/** Axis label for a live 1-minute sliding window timestamp, e.g. "14:05". */
+export function formatWindowTime(isoTimestamp: string): string {
+  try {
+    return format(new Date(isoTimestamp), 'HH:mm');
+  } catch {
+    return isoTimestamp;
+  }
+}
+
+/** Full timestamp for tooltips, where the truncated axis label isn't enough. */
+export function formatFullTimestamp(isoTimestamp: string): string {
+  try {
+    return format(new Date(isoTimestamp), 'MMM d, HH:mm:ss');
+  } catch {
+    return isoTimestamp;
+  }
+}
+</file>
+
+<file path="src/App.tsx">
+import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import { AppLayout } from './components/layout/AppLayout';
+import { DashboardPage } from './pages/DashboardPage';
+import { CatalogPage } from './pages/CatalogPage';
+import { OperationsPage } from './pages/OperationsPage';
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <AppLayout>
+        <Routes>
+          <Route path="/" element={<DashboardPage />} />
+          <Route path="/catalog" element={<CatalogPage />} />
+          <Route path="/operations" element={<OperationsPage />} />
+        </Routes>
+      </AppLayout>
+    </BrowserRouter>
+  );
+}
+</file>
+
+<file path="src/index.css">
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+</file>
+
+<file path="src/main.tsx">
+import { StrictMode } from 'react';
+import { createRoot } from 'react-dom/client';
+import App from './App';
+import './index.css';
+
+const rootElement = document.getElementById('root');
+if (!rootElement) {
+  throw new Error('Root element #root not found in index.html');
+}
+
+createRoot(rootElement).render(
+  <StrictMode>
+    <App />
+  </StrictMode>,
+);
+</file>
+
+<file path="src/vite-env.d.ts">
+/// <reference types="vite/client" />
+</file>
+
+<file path=".gitignore">
+# dependencies
+node_modules
+
+# build output
+dist
+dist-ssr
+
+# editor
+.vscode/*
+!.vscode/extensions.json
+.idea
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# env
+.env
+.env.local
+
+# os
+.DS_Store
+</file>
+
+<file path="index.html">
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Commerce Ops — Analytics Console</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+</file>
+
+<file path="package.json">
+{
+  "name": "ecommerce-analytics-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "axios": "^1.7.9",
+    "clsx": "^2.1.1",
+    "date-fns": "^4.1.0",
+    "lucide-react": "^0.468.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.28.0",
+    "recharts": "^2.13.3",
+    "swr": "^2.2.5",
+    "tailwind-merge": "^2.5.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.1",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.15",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11"
+  }
+}
+</file>
+
+<file path="postcss.config.js">
+export default {
+  plugins: {
+    tailwindcss: {},
+    autoprefixer: {},
+  },
+};
+</file>
+
+<file path="tailwind.config.js">
+/** @type {import('tailwindcss').Config} */
+export default {
+  content: ['./index.html', './src/**/*.{js,ts,jsx,tsx}'],
+  theme: {
+    extend: {},
+  },
+  plugins: [],
+};
+</file>
+
+<file path="tsconfig.app.json">
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+
+    "moduleResolution": "Bundler",
+    "allowImportingTsExtensions": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "jsx": "react-jsx",
+
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": ["src"]
+}
+</file>
+
+<file path="tsconfig.json">
+{
+  "files": [],
+  "references": [
+    { "path": "./tsconfig.app.json" },
+    { "path": "./tsconfig.node.json" }
+  ]
+}
+</file>
+
+<file path="tsconfig.node.json">
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2023"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+
+    "moduleResolution": "Bundler",
+    "allowImportingTsExtensions": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+
+    "strict": true
+  },
+  "include": ["vite.config.ts"]
+}
+</file>
+
+<file path="vite.config.ts">
+import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
+
+export default defineConfig({
+  plugins: [react()],
+  server: {
+    port: 5173,
+  },
+});
+</file>
+
+</files>
