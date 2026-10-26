@@ -5,10 +5,8 @@ import java.util.Properties;
 
 /**
  * Central place for every environment-specific value both Spark jobs need.
- * Everything is read from environment variables, with local-dev defaults
- * that match the main Spring Boot app's own application.properties
- * (DB_URL / DB_USERNAME / DB_PASSWORD / KAFKA_BOOTSTRAP_SERVERS), so the
- * same shell environment works for either process. Nothing is hardcoded.
+ * Everything is read from environment variables, with low-latency local-dev defaults
+ * that match the main Spring Boot app's application.properties.
  */
 public final class SparkAppConfig {
 
@@ -24,7 +22,7 @@ public final class SparkAppConfig {
 
     public final String checkpointBaseLocation;
 
-    /** Rows/events with occurredAt before this are DataGenerator's historical baseline (see LiveTrafficSimulator's docs). Null = now(). */
+    /** Rows/events with occurredAt before this are DataGenerator's historical baseline. Null = now(). */
     public final Instant historicalCutoff;
 
     public final String windowDuration;
@@ -50,10 +48,11 @@ public final class SparkAppConfig {
         String cutoff = env("SPARK_HISTORICAL_CUTOFF", null);
         this.historicalCutoff = cutoff != null ? Instant.parse(cutoff) : Instant.now();
 
-        this.windowDuration = env("SPARK_WINDOW_DURATION", "1 minute");
-        this.slideDuration = env("SPARK_SLIDE_DURATION", "1 minute");
-        this.watermarkDelay = env("SPARK_WATERMARK_DELAY", "2 minutes");
-        this.triggerInterval = env("SPARK_TRIGGER_INTERVAL", "30 seconds");
+        // Optimized streaming timing parameters for instant UI feedback
+        this.windowDuration = env("SPARK_WINDOW_DURATION", "30 seconds");
+        this.slideDuration = env("SPARK_SLIDE_DURATION", "30 seconds");
+        this.watermarkDelay = env("SPARK_WATERMARK_DELAY", "10 seconds");
+        this.triggerInterval = env("SPARK_TRIGGER_INTERVAL", "5 seconds");
         this.startingOffsets = env("SPARK_STARTING_OFFSETS", "latest");
 
         this.popularityHalfLifeDays = Double.parseDouble(env("SPARK_POPULARITY_HALF_LIFE_DAYS", "14"));

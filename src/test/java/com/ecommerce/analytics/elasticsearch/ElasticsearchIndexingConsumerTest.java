@@ -3,6 +3,7 @@ package com.ecommerce.analytics.elasticsearch;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
@@ -22,18 +23,22 @@ class ElasticsearchIndexingConsumerTest {
     private final ElasticsearchIndexingConsumer consumer =
             new ElasticsearchIndexingConsumer(objectMapper, productIndexingService);
 
-    private String envelope(String eventType, String payload) {
+    private String envelope(String eventType, String aggregateType, String payload) {
         return """
                 {
                   "eventId": "%s",
                   "eventType": "%s",
                   "occurredAt": "2026-09-24T10:00:00Z",
-                  "aggregateType": "Product",
+                  "aggregateType": "%s",
                   "aggregateId": 10,
                   "version": 1,
                   "payload": %s
                 }
-                """.formatted(UUID.randomUUID(), eventType, payload);
+                """.formatted(UUID.randomUUID(), eventType, aggregateType, payload);
+    }
+
+    private String envelope(String eventType, String payload) {
+        return envelope(eventType, "Product", payload);
     }
 
     @Test
@@ -59,9 +64,104 @@ class ElasticsearchIndexingConsumerTest {
         verify(productIndexingService).recomputeReviewAggregate(anyString(), eq(10L), any());
     }
 
+    // ------------------------------------------------------------------
+    // ORDER_CREATED -> processOrderCreated (real-sales ranking signal).
+    // ------------------------------------------------------------------
+
+    @Test
+    void shouldRouteOrderCreatedToProcessOrderCreated() {
+        String payload = """
+                {
+                  "orderId": 500,
+                  "userId": 7,
+                  "status": "PENDING",
+                  "paymentStatus": "UNPAID",
+                  "totalAmount": 119.97,
+                  "createdAt": "2026-09-24T10:00:00Z",
+                  "items": [
+                    {"orderItemId": 1, "productId": 10, "productName": "Phone", "quantity": 2, "unitPrice": 49.99},
+                    {"orderItemId": 2, "productId": 20, "productName": "Case", "quantity": 1, "unitPrice": 19.99}
+                  ]
+                }
+                """;
+
+        consumer.consume(envelope("ORDER_CREATED", "Order", payload));
+
+        verify(productIndexingService).processOrderCreated(
+                anyString(),
+                org.mockito.ArgumentMatchers.argThat(items ->
+                        items.size() == 2
+                                && items.get(0).getProductId().equals(10L)
+                                && items.get(0).getQuantity() == 2
+                                && items.get(1).getProductId().equals(20L)
+                                && items.get(1).getQuantity() == 1),
+                any());
+    }
+
+    @Test
+    void shouldRouteOrderCreatedWithNoItems_toProcessOrderCreatedWithEmptyList() {
+        String payload = """
+                {
+                  "orderId": 501,
+                  "userId": 7,
+                  "status": "PENDING",
+                  "paymentStatus": "UNPAID",
+                  "totalAmount": 0,
+                  "createdAt": "2026-09-24T10:00:00Z",
+                  "items": []
+                }
+                """;
+
+        consumer.consume(envelope("ORDER_CREATED", "Order", payload));
+
+        verify(productIndexingService).processOrderCreated(anyString(), eq(List.of()), any());
+    }
+
+    // ------------------------------------------------------------------
+    // ORDER_STATUS_CHANGED -> processOrderCancelled, ONLY for newStatus
+    // CANCELLED. Every other status transition must be ignored.
+    // ------------------------------------------------------------------
+
+    @Test
+    void shouldRouteOrderStatusChangedToCancelled_toProcessOrderCancelled() {
+        String payload = """
+                {"orderId": 500, "previousStatus": "PENDING", "newStatus": "CANCELLED"}
+                """;
+
+        consumer.consume(envelope("ORDER_STATUS_CHANGED", "Order", payload));
+
+        verify(productIndexingService).processOrderCancelled(anyString(), eq(500L), any());
+    }
+
+    @Test
+    void shouldRouteOrderStatusChangedToCancelled_caseInsensitively() {
+        String payload = """
+                {"orderId": 500, "previousStatus": "PENDING", "newStatus": "cancelled"}
+                """;
+
+        consumer.consume(envelope("ORDER_STATUS_CHANGED", "Order", payload));
+
+        verify(productIndexingService).processOrderCancelled(anyString(), eq(500L), any());
+    }
+
+    @Test
+    void shouldIgnoreOrderStatusChangedToNonCancelledStatuses() {
+        for (String status : List.of("PROCESSING", "SHIPPED", "DELIVERED", "PENDING")) {
+            String payload = "{\"orderId\": 500, \"previousStatus\": \"PENDING\", \"newStatus\": \"" + status + "\"}";
+            consumer.consume(envelope("ORDER_STATUS_CHANGED", "Order", payload));
+        }
+
+        verify(productIndexingService, never()).processOrderCancelled(anyString(), any(), any());
+    }
+
+    // ------------------------------------------------------------------
+    // Existing PRODUCT_*/REVIEW_* routing and irrelevant-event handling
+    // must remain intact.
+    // ------------------------------------------------------------------
+
     @Test
     void shouldIgnoreIrrelevantEventTypesWithoutError() {
-        assertDoesNotThrow(() -> consumer.consume(envelope("ORDER_CREATED", "{}")));
+        assertDoesNotThrow(() -> consumer.consume(envelope("PAYMENT_CREATED", "Payment", "{}")));
 
         verifyNoInteractions(productIndexingService);
     }

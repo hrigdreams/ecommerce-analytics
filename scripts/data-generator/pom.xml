@@ -24,6 +24,17 @@
         <maven.compiler.source>21</maven.compiler.source>
         <maven.compiler.target>21</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <!-- PHASE 1: added only for the new RefDataCategoryNounTest
+             (scripts/data-generator/src/test/.../RefDataCategoryNounTest.java),
+             which guards the item 2 "jackets in Office Supplies" fix. This
+             module has no Spring Boot parent (see the module javadoc above -
+             it's deliberately plain JDBC/no Spring), so unlike the main
+             app's own tests (which get their JUnit version from
+             spring-boot-starter-test's dependency management), this module
+             has to pin its own version explicitly. 5.11.3 was the latest
+             JUnit 5 release at the time of this change - bump it freely,
+             nothing else in this module depends on the exact version. -->
+        <junit.jupiter.version>5.11.3</junit.jupiter.version>
     </properties>
 
     <dependencies>
@@ -31,6 +42,22 @@
             <groupId>org.postgresql</groupId>
             <artifactId>postgresql</artifactId>
             <version>42.7.4</version>
+        </dependency>
+        <!-- PHASE 1: test-only, see note on junit.jupiter.version above. -->
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>${junit.jupiter.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <!-- PHASE 1: Surefire 3.x needs this on the test classpath to discover
+             JUnit 5 tests when a project (like this one) has no Spring Boot
+             parent providing it transitively. -->
+        <dependency>
+            <groupId>org.junit.platform</groupId>
+            <artifactId>junit-platform-launcher</artifactId>
+            <version>1.11.3</version>
+            <scope>test</scope>
         </dependency>
     </dependencies>
 
@@ -41,6 +68,15 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
                 <version>3.13.0</version>
+            </plugin>
+            <!-- PHASE 1: this module had no test-running plugin configured at
+                 all before (no tests existed). Needed for `mvn test` to pick
+                 up RefDataCategoryNounTest; does not affect `mvn package`'s
+                 shaded jar output. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.5.1</version>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>

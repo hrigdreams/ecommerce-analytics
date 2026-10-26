@@ -28,6 +28,14 @@ import java.util.Random;
  *
  * Connection settings come from env vars (with the same defaults as the main
  * app's application.properties), or override with -Ddb.url=... etc.
+ *
+ * PHASE 1 (item 2) note: {@code --reset} here only truncates the relational
+ * + JPA-side analytics tables it always has (see resetTables() below) — it
+ * does NOT touch the spark_batch_*/spark_streaming_* tables, which are
+ * written directly by the separate spark-analytics JVM process, not by this
+ * generator. Purging those is handled by the new sql/reset_and_reseed.sql
+ * script (run that first), so this class is unchanged in that respect; the
+ * actual Phase 1 fix in this file is scoped to seedProducts() below.
  */
 public class DataGenerator {
 
@@ -218,6 +226,26 @@ public class DataGenerator {
         long[] categoryIds;
     }
 
+    /**
+     * PHASE 1 FIX (item 2 - "jackets in Office Supplies") + PHASE 3A FIX
+     * (data corruption item 1 - "Wireless Jacket"):
+     * <p>
+     * Before PHASE 1, the category index and the product noun were chosen by
+     * two completely independent {@code random.nextInt(...)} calls, so a
+     * noun from anywhere in the flat RefData.PRODUCT_NOUNS list could be
+     * combined with any category — nothing stopped "Jacket" landing under
+     * "Office Supplies". PHASE 1 fixed the noun half of that by picking it
+     * from {@code RefData.CATEGORY_PRODUCT_NOUNS[categoryIndex]} instead.
+     * <p>
+     * PHASE 3A fixes the other half: the adjective was still being picked
+     * from the flat, category-agnostic {@code RefData.PRODUCT_ADJECTIVES}
+     * list, which is exactly how a correctly-scoped Fashion noun ("Jacket")
+     * could still end up paired with an Electronics-flavored adjective
+     * ("Wireless"). The adjective is now picked from
+     * {@code RefData.CATEGORY_PRODUCT_ADJECTIVES[categoryIndex]} — the same
+     * category index already used for the noun — so both halves of the
+     * generated name agree with the category it's filed under.
+     */
     private ProductSeedResult seedProducts(int count, long[] categoryIds) throws Exception {
         ProductSeedResult result = new ProductSeedResult();
         result.ids = new long[count];
@@ -236,7 +264,14 @@ public class DataGenerator {
                     Object[] cat = RefData.CATEGORIES[categoryIndex];
                     long categoryId = categoryIds[categoryIndex];
 
-                    String name = pick(RefData.PRODUCT_ADJECTIVES) + " " + pick(RefData.PRODUCT_NOUNS) + " " + (i + 1);
+                    // PHASE 1 FIX: noun pool scoped to this category, not the
+                    // whole flat RefData.PRODUCT_NOUNS list. PHASE 3A FIX:
+                    // adjective pool scoped to this SAME category index too,
+                    // not the flat RefData.PRODUCT_ADJECTIVES list. See method
+                    // javadoc.
+                    String[] adjectivesForCategory = RefData.CATEGORY_PRODUCT_ADJECTIVES[categoryIndex];
+                    String[] nounsForCategory = RefData.CATEGORY_PRODUCT_NOUNS[categoryIndex];
+                    String name = pick(adjectivesForCategory) + " " + pick(nounsForCategory) + " " + (i + 1);
                     double min = (double) cat[1];
                     double max = (double) cat[2];
                     double price = Math.round((min + random.nextDouble() * (max - min)) * 100.0) / 100.0;

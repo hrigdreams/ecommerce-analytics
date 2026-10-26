@@ -36,6 +36,26 @@ import java.util.Properties;
  * does not compute or touch popularityScore anywhere - so there is no
  * second writer to double-count against.
  *
+ * PHASE 1, item 4 (daily revenue rollups should include today's streamed
+ * activity): dailyRevenueTrend now follows that exact same precedent -
+ * it's computed from {@code allOrders} (unfiltered) instead of the
+ * historicalCutoff-filtered {@code orders}. Before this change, a day's bar
+ * in the revenue trend chart would stay frozen at its historical-baseline
+ * value even while the simulator/Kafka pipeline kept adding paid orders for
+ * "today" in the live Postgres table - re-running this batch job wouldn't
+ * move today's number at all, since every order created after the cutoff
+ * was filtered out before dailyRevenueTrend ever saw it. productPerformance,
+ * categoryPerformance, customerBehavior, geoPerformance and
+ * hourOfDayPattern are deliberately left on the filtered {@code orders}
+ * Dataset, unchanged - those are still meant to answer "how did the
+ * historical baseline look", which is a different, still-useful question,
+ * and the request's item 4 was specifically about the daily revenue rollup,
+ * not every spark_batch_* table. Widening all of them to allOrders in one
+ * sweep was considered and rejected: it would silently change what every
+ * other chart means (and could double-count against spark_streaming_*'s own
+ * live numbers in those sections of the dashboard) for a request that was
+ * about revenue trend specifically.
+ *
  * Run: see README.md ("Running the batch job").
  */
 public class SparkBatchAnalyticsJob {
@@ -71,8 +91,9 @@ public class SparkBatchAnalyticsJob {
 
         Dataset<Row> orders = readFiltered(spark, config.dbUrl, jdbcProps,
                 "orders", "created_at", cutoff);
-        // Unfiltered (no historicalCutoff) - see class doc above for why popularity
-        // needs to see all orders, not just the pre-cutoff historical baseline.
+        // Unfiltered (no historicalCutoff) - see class doc above for why both
+        // popularity AND (as of Phase 1, item 4) the daily revenue trend need
+        // to see all orders, not just the pre-cutoff historical baseline.
         Dataset<Row> allOrders = spark.read().jdbc(config.dbUrl, "orders", jdbcProps);
         Dataset<Row> orderItems = spark.read().jdbc(config.dbUrl, "order_items", jdbcProps);
         Dataset<Row> products = spark.read().jdbc(config.dbUrl, "products", jdbcProps);
@@ -86,7 +107,10 @@ public class SparkBatchAnalyticsJob {
         Dataset<Row> productPerformance = BatchAnalytics.productPerformance(orders, orderItems, products);
         Dataset<Row> categoryPerformance = BatchAnalytics.categoryPerformance(productPerformance, categories);
         Dataset<Row> customerBehavior = BatchAnalytics.customerBehavior(orders);
-        Dataset<Row> dailyRevenueTrend = BatchAnalytics.dailyRevenueTrend(orders);
+        // PHASE 1, item 4: allOrders (unfiltered), not orders (historical-only) -
+        // see class javadoc for the rationale and why the other Datasets below
+        // deliberately stay on the filtered `orders` Dataset.
+        Dataset<Row> dailyRevenueTrend = BatchAnalytics.dailyRevenueTrend(allOrders);
         Dataset<Row> geoPerformance = BatchAnalytics.geoPerformance(orders, users);
         Dataset<Row> hourOfDayPattern = BatchAnalytics.hourOfDayPattern(orders);
         Dataset<Row> productPopularity = BatchAnalytics.productPopularity(

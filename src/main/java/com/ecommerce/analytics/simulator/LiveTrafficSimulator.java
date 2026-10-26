@@ -1,20 +1,24 @@
 package com.ecommerce.analytics.simulator;
 
+import com.ecommerce.analytics.simulator.dto.RecentSimEvent;
 import com.ecommerce.analytics.simulator.dto.SimulatorStartRequest;
 import com.ecommerce.analytics.simulator.dto.SimulatorStatus;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClientResponseException;
 
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
@@ -23,7 +27,28 @@ import java.util.concurrent.atomic.AtomicReference;
 /**
  * Generates realistic live ecommerce traffic by calling application's own REST API — never PostgreSQL or Kafka directly:
  *  historicalCutoff defaults to the instant this simulator
- * */
+ *
+ * PHASE 1, item 3 (continuous background pulse): this class now supports
+ * TWO independent ways to run, sharing the same action pool/state
+ * (userPool, productPool, cartIdByUser, orders, reviews, action counters):
+ * <ol>
+ *   <li><b>Burst/unbounded mode</b> (original, unchanged): {@link #start(SimulatorStartRequest)}
+ *       / {@link #stop()}, a dedicated daemon Thread running {@link #runLoop}
+ *       for a fixed {@code iterations} count (or unbounded if <= 0), firing
+ *       one action every {@code intervalMs}. Kept exactly as it was so the
+ *       existing "Start simulator" button/tests/iterations-burst behavior
+ *       keeps working unchanged.</li>
+ *   <li><b>Pulse mode</b> (new): {@link #pulseStart()} / {@link #pulseStop()}
+ *       turn on/off a genuine {@code @Scheduled} tick ({@link #pulseTick()}),
+ *       which fires every {@code app.simulator.pulse.interval-ms} and runs a
+ *       random number of actions (between {@code min-events-per-tick} and
+ *       {@code max-events-per-tick}) each time it fires — a slow, steady
+ *       trickle of activity instead of one big burst. This is additive: nothing
+ *       about burst mode was removed, per the project's established pattern of
+ *       flagging a literal "replace" in the request as a reasoned, documented
+ *       deviation when replacing would break existing behavior/tests.</li>
+ * </ol>
+ */
 @Component
 @EnableConfigurationProperties(SimulatorProperties.class)
 public class LiveTrafficSimulator {
@@ -42,14 +67,42 @@ public class LiveTrafficSimulator {
     private final AtomicReference<Instant> historicalCutoff = new AtomicReference<>();
     private volatile int targetIterations;
 
+    // PHASE 1, item 3: pulse-mode state. Deliberately separate from `running`/
+    // `stopRequested` above (those remain burst-mode-only) so the two modes
+    // can be queried and toggled independently via SimulatorStatus.
+    private final AtomicBoolean pulseRunning = new AtomicBoolean(false);
+    private final Random pulseRandom = new Random();
+    private volatile SimulatorClient pulseClient;
+
     // In-memory session state: resources this run has created, so later
     // actions reference REAL generated IDs instead of guessing/hardcoding.
+    // Shared between burst mode and pulse mode on purpose -- both modes call
+    // the same actionXxx() methods below, and sharing this state means a cart
+    // pulse mode created can be added to/checked out by burst mode and vice
+    // versa, instead of maintaining two disconnected, half-populated pools.
     private final List<Long> userPool = new CopyOnWriteArrayList<>();
     private final List<Long> productPool = new CopyOnWriteArrayList<>();
     private final Map<Long, Long> cartIdByUser = new ConcurrentHashMap<>();
     private final Map<Long, List<TrackedCartItem>> itemsByCart = new ConcurrentHashMap<>();
     private final List<TrackedOrder> orders = new CopyOnWriteArrayList<>();
     private final List<TrackedReview> reviews = new CopyOnWriteArrayList<>();
+
+    /**
+     * PHASE 3A, item 3 (operational visibility): bounded in-memory log of
+     * the raw events this simulator has successfully generated, newest
+     * first, for GET /api/v1/simulator/events/recent to build a live
+     * streaming terminal log in the UI. Deliberately in-memory only (not
+     * persisted, not published anywhere) - this is a debugging/visibility
+     * aid scoped to "what has this running instance done recently", not an
+     * analytics source; the real analytics pipeline is Kafka -> Spark/
+     * Elasticsearch, unaffected by this. ConcurrentLinkedDeque because both
+     * burst mode (its own daemon Thread) and pulse mode (a @Scheduled tick)
+     * can record events concurrently with no external synchronization, and
+     * a caller can safely iterate a snapshot (see recentEvents()) while a
+     * writer is still adding to the head.
+     */
+    private static final int RECENT_EVENTS_CAPACITY = 100;
+    private final Deque<RecentSimEvent> recentEvents = new ConcurrentLinkedDeque<>();
 
     private record TrackedCartItem(long itemId, long productId) {}
 
@@ -88,7 +141,7 @@ public class LiveTrafficSimulator {
     }
 
 
-    // Lifecycle
+    // Lifecycle (burst/unbounded mode - unchanged from before Phase 1)
 
 
     public synchronized void start(SimulatorStartRequest overrides) {
@@ -158,12 +211,151 @@ public class LiveTrafficSimulator {
                 historicalCutoff.get(),
                 startedAt.get(),
                 counts,
-                lastError.get()
+                lastError.get(),
+                pulseRunning.get()
         );
     }
 
+    /**
+     * PHASE 3A, item 3: snapshot of the recent-events log, newest first,
+     * most-recent-{@value #RECENT_EVENTS_CAPACITY} only. Returns an
+     * immutable copy (not a live view over the deque) so the controller can
+     * serialize it without racing a concurrent writer mid-iteration.
+     */
+    public List<RecentSimEvent> recentEvents() {
+        return List.copyOf(recentEvents);
+    }
+
+    /**
+     * Records one successfully-completed action into the bounded recent-
+     * events log, evicting the oldest entry once at capacity. Called only
+     * from {@link #executeAction} after a successful run - per this task's
+     * own scope ("events it successfully generates"), a failed action is
+     * NOT logged here (it is already captured by actionsFailed/lastError in
+     * {@link #status()}).
+     */
+    private void recordRecentEvent(String eventType, String mode, String detail) {
+        recentEvents.addFirst(new RecentSimEvent(eventType, Instant.now(), mode, detail));
+        while (recentEvents.size() > RECENT_EVENTS_CAPACITY) {
+            recentEvents.removeLast();
+        }
+    }
+
     // ------------------------------------------------------------------
-    // Main loop
+    // Lifecycle (PHASE 1, item 3 - continuous pulse mode, additive)
+    // ------------------------------------------------------------------
+
+    /**
+     * Turns on the continuous pulse: from this call onward, {@link #pulseTick()}
+     * (already running on a schedule for every instance, gated by
+     * {@link #pulseRunning}) starts actually executing actions. Loads the
+     * user/product pools itself if they are still empty, so pulse mode works
+     * standing alone without ever calling {@link #start} first.
+     */
+    public synchronized void pulseStart() {
+        if (!properties.isEnabled()) {
+            throw new IllegalStateException(
+                    "Simulator is disabled. Set app.simulator.enabled=true to allow starting it."
+            );
+        }
+        if (pulseRunning.get()) {
+            throw new IllegalStateException("Simulator pulse is already running.");
+        }
+
+        if (pulseClient == null) {
+            pulseClient = new SimulatorClient(properties.getBaseUrl());
+        }
+        ensurePoolsLoaded(pulseClient);
+
+        if (startedAt.get() == null) {
+            startedAt.set(Instant.now());
+        }
+        if (historicalCutoff.get() == null) {
+            historicalCutoff.set(
+                    properties.getHistoricalCutoff() != null ? properties.getHistoricalCutoff() : Instant.now()
+            );
+        }
+
+        pulseRunning.set(true);
+        log.info("[sim] pulse mode started: intervalMs={} eventsPerTick={}-{}",
+                properties.getPulse().getIntervalMs(),
+                properties.getPulse().getMinEventsPerTick(),
+                properties.getPulse().getMaxEventsPerTick());
+    }
+
+    public synchronized void pulseStop() {
+        if (!pulseRunning.get()) {
+            throw new IllegalStateException("Simulator pulse is not running.");
+        }
+        pulseRunning.set(false);
+        log.info("[sim] pulse mode stopped");
+    }
+
+    /**
+     * Fires on a fixed delay from the moment the app starts (not just while
+     * pulse mode is on) — {@code pulseRunning} is the actual on/off switch,
+     * checked first so a tick is a no-op whenever pulse mode hasn't been
+     * started via {@link #pulseStart()}. This is the standard
+     * "always-scheduled, conditionally-active" pattern for a toggleable
+     * {@code @Scheduled} task, and avoids registering/cancelling a
+     * ScheduledFuture by hand.
+     * <p>
+     * Runs 2-5 (configurable via app.simulator.pulse.min/max-events-per-tick)
+     * of the same weighted random actions burst mode uses ({@link #pickAction}),
+     * so pulse-mode traffic looks like the same mix of browsing/cart/checkout
+     * activity, just trickled in slowly instead of arriving all at once.
+     */
+    @Scheduled(fixedDelayString = "${app.simulator.pulse.interval-ms:12000}")
+    public void pulseTick() {
+        if (!pulseRunning.get()) {
+            return;
+        }
+        if (pulseClient == null) {
+            pulseClient = new SimulatorClient(properties.getBaseUrl());
+        }
+        if (userPool.isEmpty() || productPool.isEmpty()) {
+            try {
+                ensurePoolsLoaded(pulseClient);
+            } catch (Exception e) {
+                log.warn("[sim] pulse tick skipped - could not load user/product pools: {}", e.getMessage());
+                lastError.set("pulse pool load failed: " + e.getMessage());
+                return;
+            }
+            if (userPool.isEmpty() || productPool.isEmpty()) {
+                log.warn("[sim] pulse tick skipped - user/product pool still empty, has DataGenerator run yet?");
+                return;
+            }
+        }
+
+        int min = Math.max(0, properties.getPulse().getMinEventsPerTick());
+        int max = Math.max(min, properties.getPulse().getMaxEventsPerTick());
+        int count = min + (max > min ? pulseRandom.nextInt(max - min + 1) : 0);
+
+        for (int i = 0; i < count; i++) {
+            SimAction action = pickAction(pulseRandom);
+            executeAction(action, pulseClient, pulseRandom, "PULSE");
+        }
+        log.info("[sim] pulse tick: ran {} action(s)", count);
+    }
+
+    /** Loads userPool/productPool once if empty, shared by both start() paths. */
+    private void ensurePoolsLoaded(SimulatorClient client) {
+        if (!userPool.isEmpty() && !productPool.isEmpty()) {
+            return;
+        }
+        List<Long> userIds = client.fetchUserIds(properties.getUserPoolSize());
+        List<Long> productIds = client.fetchProductIds(properties.getProductPoolSize());
+        if (userPool.isEmpty()) {
+            userPool.addAll(userIds);
+        }
+        if (productPool.isEmpty()) {
+            productPool.addAll(productIds);
+        }
+        log.info("[sim] pools loaded (pulse): {} users, {} products", userPool.size(), productPool.size());
+    }
+
+    // ------------------------------------------------------------------
+    // Main loop (burst/unbounded mode)
     // ------------------------------------------------------------------
 
     private void runLoop(int iterations, long intervalMs, long seed) {
@@ -193,19 +385,7 @@ public class LiveTrafficSimulator {
         int i = 0;
         while (!stopRequested.get() && (iterations <= 0 || i < iterations)) {
             SimAction action = pickAction(random);
-            try {
-                action.run(client, random);
-                actionsCompleted.incrementAndGet();
-            } catch (RestClientResponseException e) {
-                actionsFailed.incrementAndGet();
-                lastError.set(action.name() + ": HTTP " + e.getStatusCode());
-                log.warn("[sim] {} failed: HTTP {} {}", action.name(), e.getStatusCode(), shorten(e.getResponseBodyAsString()));
-            } catch (Exception e) {
-                actionsFailed.incrementAndGet();
-                lastError.set(action.name() + ": " + e.getMessage());
-                log.warn("[sim] {} failed: {}", action.name(), e.getMessage());
-            }
-            actionCounts.computeIfAbsent(action.name(), k -> new AtomicLong()).incrementAndGet();
+            executeAction(action, client, random, "BURST");
 
             i++;
             if (intervalMs > 0) {
@@ -223,6 +403,36 @@ public class LiveTrafficSimulator {
                 actionsCompleted.get(), actionsFailed.get(), actionCounts);
     }
 
+    /**
+     * Runs one action and records its outcome (success/failure counters,
+     * lastError, per-action-name counts). Extracted from the body of
+     * {@link #runLoop} (PHASE 1, item 3) so {@link #pulseTick()} can reuse the
+     * exact same execute-and-record behavior instead of duplicating it.
+     * <p>
+     * PHASE 3A, item 3: on success, also appends to the bounded recent-
+     * events log via {@link #recordRecentEvent} - {@code mode} ("BURST" or
+     * "PULSE") identifies which caller this was, and the detail string
+     * {@link SimAction#run} now returns is reused as both the event log's
+     * "detail" field here and nothing else (no change to what gets logged
+     * via SLF4J - each action method still calls log.info itself).
+     */
+    private void executeAction(SimAction action, SimulatorClient client, Random random, String mode) {
+        try {
+            String detail = action.run(client, random);
+            actionsCompleted.incrementAndGet();
+            recordRecentEvent(action.name(), mode, detail);
+        } catch (RestClientResponseException e) {
+            actionsFailed.incrementAndGet();
+            lastError.set(action.name() + ": HTTP " + e.getStatusCode());
+            log.warn("[sim] {} failed: HTTP {} {}", action.name(), e.getStatusCode(), shorten(e.getResponseBodyAsString()));
+        } catch (Exception e) {
+            actionsFailed.incrementAndGet();
+            lastError.set(action.name() + ": " + e.getMessage());
+            log.warn("[sim] {} failed: {}", action.name(), e.getMessage());
+        }
+        actionCounts.computeIfAbsent(action.name(), k -> new AtomicLong()).incrementAndGet();
+    }
+
     private static String shorten(String s) {
         if (s == null) return "";
         return s.length() > 160 ? s.substring(0, 160) + "..." : s;
@@ -234,7 +444,14 @@ public class LiveTrafficSimulator {
 
     @FunctionalInterface
     private interface SimAction {
-        void run(SimulatorClient client, Random random) throws Exception;
+        /**
+         * @return a short, human-readable detail string describing what the
+         * action did (e.g. "orderId=482 userId=17 total=129.50") - PHASE 3A,
+         * item 3: used as the "detail" field for the recent-events log. Every
+         * action method below returns the same information it already logs
+         * via SLF4J, just also handed back to the caller.
+         */
+        String run(SimulatorClient client, Random random) throws Exception;
 
         default String name() {
             return this.getClass().getSimpleName();
@@ -265,14 +482,14 @@ public class LiveTrafficSimulator {
             if (target < cumulative) {
                 SimAction inner = c.action();
                 return new SimAction() {
-                    public void run(SimulatorClient client, Random rnd) throws Exception { inner.run(client, rnd); }
+                    public String run(SimulatorClient client, Random rnd) throws Exception { return inner.run(client, rnd); }
                     public String name() { return c.name(); }
                 };
             }
         }
         Choice fallback = choices.get(0);
         return new SimAction() {
-            public void run(SimulatorClient client, Random rnd) throws Exception { fallback.action().run(client, rnd); }
+            public String run(SimulatorClient client, Random rnd) throws Exception { return fallback.action().run(client, rnd); }
             public String name() { return fallback.name(); }
         };
     }
@@ -289,15 +506,16 @@ public class LiveTrafficSimulator {
     // Actions
     // ------------------------------------------------------------------
 
-    private void actionCreateCart(SimulatorClient client, Random random) {
+    private String actionCreateCart(SimulatorClient client, Random random) {
         long userId = randomUser(random);
         long cartId = client.createOrGetCart(userId);
         cartIdByUser.put(userId, cartId);
         itemsByCart.putIfAbsent(cartId, new CopyOnWriteArrayList<>());
         log.info("[sim] CREATE_CART POST /api/v1/carts -> cartId={} userId={}", cartId, userId);
+        return "cartId=" + cartId + " userId=" + userId;
     }
 
-    private void actionAddCartItem(SimulatorClient client, Random random) {
+    private String actionAddCartItem(SimulatorClient client, Random random) {
         long userId = randomUser(random);
         long cartId = cartIdByUser.computeIfAbsent(userId, client::createOrGetCart);
         long productId = randomProduct(random);
@@ -309,13 +527,13 @@ public class LiveTrafficSimulator {
 
         log.info("[sim] ADD_CART_ITEM POST /api/v1/carts/{}/items -> itemId={} productId={} qty={}",
                 cartId, itemId, productId, quantity);
+        return "cartId=" + cartId + " itemId=" + itemId + " productId=" + productId + " qty=" + quantity;
     }
 
-    private void actionUpdateCartItem(SimulatorClient client, Random random) {
+    private String actionUpdateCartItem(SimulatorClient client, Random random) {
         var candidate = anyCartWithItems();
         if (candidate == null) {
-            actionAddCartItem(client, random); // nothing to update yet - seed one instead
-            return;
+            return actionAddCartItem(client, random); // nothing to update yet - seed one instead
         }
         long cartId = candidate.getKey();
         TrackedCartItem item = candidate.getValue();
@@ -323,13 +541,13 @@ public class LiveTrafficSimulator {
 
         client.updateCartItem(cartId, item.itemId(), item.productId(), quantity);
         log.info("[sim] UPDATE_CART_ITEM PUT /api/v1/carts/{}/items/{} -> qty={}", cartId, item.itemId(), quantity);
+        return "cartId=" + cartId + " itemId=" + item.itemId() + " qty=" + quantity;
     }
 
-    private void actionRemoveCartItem(SimulatorClient client, Random random) {
+    private String actionRemoveCartItem(SimulatorClient client, Random random) {
         var candidate = anyCartWithItems();
         if (candidate == null) {
-            actionAddCartItem(client, random); // nothing to remove yet - seed one instead
-            return;
+            return actionAddCartItem(client, random); // nothing to remove yet - seed one instead
         }
         long cartId = candidate.getKey();
         TrackedCartItem item = candidate.getValue();
@@ -337,6 +555,7 @@ public class LiveTrafficSimulator {
         client.removeCartItem(cartId, item.itemId());
         itemsByCart.getOrDefault(cartId, List.of()).remove(item);
         log.info("[sim] REMOVE_CART_ITEM DELETE /api/v1/carts/{}/items/{}", cartId, item.itemId());
+        return "cartId=" + cartId + " itemId=" + item.itemId();
     }
 
     private Map.Entry<Long, TrackedCartItem> anyCartWithItems() {
@@ -349,7 +568,7 @@ public class LiveTrafficSimulator {
         return null;
     }
 
-    private void actionCreateOrder(SimulatorClient client, Random random) {
+    private String actionCreateOrder(SimulatorClient client, Random random) {
         long userId = randomUser(random);
         int lineCount = 1 + random.nextInt(3);
         List<Map<String, Object>> items = new ArrayList<>();
@@ -365,13 +584,14 @@ public class LiveTrafficSimulator {
 
         log.info("[sim] CREATE_ORDER POST /api/v1/orders -> orderId={} userId={} total={} status={}",
                 created.orderId(), userId, created.totalAmount(), created.status());
+        return "orderId=" + created.orderId() + " userId=" + userId + " total=" + created.totalAmount()
+                + " status=" + created.status();
     }
 
-    private void actionCreatePayment(SimulatorClient client, Random random) {
+    private String actionCreatePayment(SimulatorClient client, Random random) {
         TrackedOrder order = orders.stream().filter(o -> !o.paid).findAny().orElse(null);
         if (order == null) {
-            actionCreateOrder(client, random); // nothing to pay for yet - seed one instead
-            return;
+            return actionCreateOrder(client, random); // nothing to pay for yet - seed one instead
         }
 
         String status = random.nextInt(100) < 88 ? "PAID" : (random.nextBoolean() ? "FAILED" : "REFUNDED");
@@ -382,18 +602,18 @@ public class LiveTrafficSimulator {
 
         log.info("[sim] CREATE_PAYMENT POST /api/v1/payments -> orderId={} amount={} status={}",
                 order.orderId, order.totalAmount, status);
+        return "orderId=" + order.orderId + " amount=" + order.totalAmount + " method=" + method + " status=" + status;
     }
 
     private static final List<String> STATUS_PROGRESSION =
             List.of("PENDING", "CONFIRMED", "PROCESSING", "SHIPPED", "DELIVERED");
 
-    private void actionChangeOrderStatus(SimulatorClient client, Random random) {
+    private String actionChangeOrderStatus(SimulatorClient client, Random random) {
         TrackedOrder order = orders.stream()
                 .filter(o -> !o.status.equals("DELIVERED") && !o.status.equals("CANCELLED"))
                 .findAny().orElse(null);
         if (order == null) {
-            actionCreateOrder(client, random); // nothing eligible yet - seed one instead
-            return;
+            return actionCreateOrder(client, random); // nothing eligible yet - seed one instead
         }
 
         String next;
@@ -412,6 +632,7 @@ public class LiveTrafficSimulator {
 
         log.info("[sim] CHANGE_ORDER_STATUS PATCH /api/v1/orders/{}/status?status={} -> orderId={}",
                 order.orderId, next, order.orderId);
+        return "orderId=" + order.orderId + " status=" + next;
     }
 
     private static final List<String> REVIEW_COMMENTS = List.of(
@@ -420,7 +641,7 @@ public class LiveTrafficSimulator {
             "Excellent quality, highly recommend.", "Average product, does the job."
     );
 
-    private void actionCreateReview(SimulatorClient client, Random random) {
+    private String actionCreateReview(SimulatorClient client, Random random) {
         long userId = randomUser(random);
         long productId = randomProduct(random);
         int rating = 1 + random.nextInt(5);
@@ -431,12 +652,12 @@ public class LiveTrafficSimulator {
 
         log.info("[sim] CREATE_REVIEW POST /api/v1/reviews -> reviewId={} productId={} rating={}",
                 reviewId, productId, rating);
+        return "reviewId=" + reviewId + " productId=" + productId + " userId=" + userId + " rating=" + rating;
     }
 
-    private void actionUpdateReview(SimulatorClient client, Random random) {
+    private String actionUpdateReview(SimulatorClient client, Random random) {
         if (reviews.isEmpty()) {
-            actionCreateReview(client, random); // nothing to update yet - seed one instead
-            return;
+            return actionCreateReview(client, random); // nothing to update yet - seed one instead
         }
         TrackedReview review = reviews.get(random.nextInt(reviews.size()));
         int newRating = 1 + random.nextInt(5);
@@ -445,5 +666,6 @@ public class LiveTrafficSimulator {
         client.updateReview(review.reviewId(), review.userId(), review.productId(), newRating, newComment);
 
         log.info("[sim] UPDATE_REVIEW PUT /api/v1/reviews/{} -> rating={}", review.reviewId(), newRating);
+        return "reviewId=" + review.reviewId() + " productId=" + review.productId() + " rating=" + newRating;
     }
 }

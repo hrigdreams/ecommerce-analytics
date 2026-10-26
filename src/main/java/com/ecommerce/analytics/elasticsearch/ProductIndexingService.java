@@ -2,8 +2,12 @@ package com.ecommerce.analytics.elasticsearch;
 
 import com.ecommerce.analytics.elasticsearch.document.ProductDocument;
 import com.ecommerce.analytics.entity.Category;
+import com.ecommerce.analytics.entity.Order;
+import com.ecommerce.analytics.entity.OrderItem;
+import com.ecommerce.analytics.event.payload.order.OrderItemEvent;
 import com.ecommerce.analytics.repository.CategoryRepository;
 import com.ecommerce.analytics.repository.EsProcessedEventRepository;
+import com.ecommerce.analytics.repository.OrderRepository;
 import com.ecommerce.analytics.repository.ReviewRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -18,6 +22,7 @@ import java.io.IOException;
 import java.net.ConnectException;
 import java.net.SocketTimeoutException;
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.Callable;
 /**
@@ -76,6 +81,27 @@ import java.util.concurrent.Callable;
  *     in the hardening report for what would need to change if that is ever
  *     increased or this consumer is horizontally scaled).
  *
+ *     ORDER_CREATED events have the SAME partitioning characteristic as
+ *     reviews: OrderService publishes them keyed by orderId (aggregateType
+ *     "Order"), not productId, so two orders that both reference product X
+ *     can land on different partitions with no ordering guarantee between
+ *     them relative to each other OR to that product's own
+ *     PRODUCT_CREATED/UPDATED events. processOrderCreated()/
+ *     processOrderCancelled() below do not need an ordering/staleness guard
+ *     the way upsertProduct() does, though: they only ever apply a
+ *     positive/negative delta via an atomic Elasticsearch script
+ *     (increment/decrement - see ProductRankingUpdateService), so "out of
+ *     order" delivery of two ORDER_CREATED events for the same product is
+ *     harmless - the increments still sum to the same total regardless of
+ *     which is applied first. ORDER_CREATED and ORDER_STATUS_CHANGED for
+ *     the SAME order, however, ARE guaranteed in order relative to each
+ *     other - both are published keyed by that order's id (see
+ *     PaymentService's own comment: "Key by ORDER id so ORDER_CREATED,
+ *     ORDER_STATUS_CHANGED and PAYMENT_CREATED for one order land on the
+ *     same partition (in order)") - which is what makes a cancellation's
+ *     decrement safe to apply without first checking whether the original
+ *     increment already happened.
+ *
  *   - Elasticsearch downtime / retry classification: retries are bounded (3
  *     attempts, linear backoff) and ONLY for transient failures - connection
  *     refused/timeout (DataAccessResourceFailureException, or a
@@ -83,12 +109,14 @@ import java.util.concurrent.Callable;
  *     cause chain of an UncategorizedElasticsearchException, which is how
  *     Spring Data Elasticsearch generally wraps lower-level client/transport
  *     errors). Anything else - including a well-formed 4xx from Elasticsearch
- *     itself (bad request, mapping error) - is NOT retried; it is rethrown
- *     immediately, since retrying a permanently-invalid request cannot ever
- *     succeed and would just waste time before giving up anyway. This
- *     project has no spring-retry/resilience4j dependency, so this is a
- *     small manual retry loop rather than a new library for a few lines of
- *     logic.
+ *     itself (bad request, mapping error, or a document-missing 404 from an
+ *     ORDER_CREATED/ORDER_STATUS_CHANGED ranking update - see
+ *     processOrderCreated/processOrderCancelled) - is NOT retried; it is
+ *     rethrown immediately, since retrying a permanently-invalid request
+ *     cannot ever succeed and would just waste time before giving up
+ *     anyway. This project has no spring-retry/resilience4j dependency, so
+ *     this is a small manual retry loop rather than a new library for a few
+ *     lines of logic.
  */
 @Service
 public class ProductIndexingService {
@@ -102,17 +130,23 @@ public class ProductIndexingService {
     private final CategoryRepository categoryRepository;
     private final EsProcessedEventRepository esProcessedEventRepository;
     private final ReviewRepository reviewRepository;
+    private final ProductRankingUpdateService productRankingUpdateService;
+    private final OrderRepository orderRepository;
 
     public ProductIndexingService(
             ElasticsearchOperations elasticsearchOperations,
             CategoryRepository categoryRepository,
             EsProcessedEventRepository esProcessedEventRepository,
-            ReviewRepository reviewRepository
+            ReviewRepository reviewRepository,
+            ProductRankingUpdateService productRankingUpdateService,
+            OrderRepository orderRepository
     ) {
         this.elasticsearchOperations = elasticsearchOperations;
         this.categoryRepository = categoryRepository;
         this.esProcessedEventRepository = esProcessedEventRepository;
         this.reviewRepository = reviewRepository;
+        this.productRankingUpdateService = productRankingUpdateService;
+        this.orderRepository = orderRepository;
     }
 
     /** Default coordinates: resolves to the "products" ALIAS (whatever physical index it currently points at). */
@@ -241,6 +275,219 @@ public class ProductIndexingService {
     }
 
     // ------------------------------------------------------------------
+    // ORDER_CREATED -> ranking signals (real sales data).
+    // ------------------------------------------------------------------
+
+    /**
+     * Applies the real-sales ranking signal for one ORDER_CREATED event: for
+     * every item in the order, atomically adds that item's quantity to the
+     * corresponding product's salesCount in Elasticsearch.
+     * <p>
+     * Idempotency has two layers, both built on the existing
+     * es_processed_events table/markProcessed()/existsById() mechanism:
+     * <ol>
+     *   <li><b>Whole-event fast path</b>: keyed by the event's own eventId.
+     *   If the WHOLE event already completed, this is a single
+     *   existsById() lookup and nothing else happens.</li>
+     *   <li><b>Per-item keys</b>: each order item is additionally keyed by
+     *   {@code eventId + ":item:" + orderItemId} (orderItemId is the
+     *   order_items row's own database id - globally unique). This is what
+     *   makes PARTIAL failure safe: if one item fails, the others are each
+     *   individually marked the moment their own increment succeeds, and
+     *   the event-level marker is only written after every item succeeded.
+     *   On redelivery, already-applied items are skipped and ONLY the
+     *   failed one is retried - this is required because, unlike
+     *   upsertProduct, re-applying this operation is NOT naturally
+     *   idempotent (it is a +=, not a set).</li>
+     * </ol>
+     * Product missing from the index: the increment throws (document
+     * missing), isTransient() does not retry it, the exception propagates,
+     * nothing is marked processed, and Kafka redelivers later - see
+     * ElasticsearchIndexingConsumer's class doc for the acknowledgment
+     * contract this relies on.
+     *
+     * @return true if this event was newly (at least partially) processed,
+     * false only if the whole event was already fully processed before.
+     */
+    public boolean processOrderCreated(String eventId, List<OrderItemEvent> items, Instant occurredAt) {
+        if (alreadyProcessed(eventId)) {
+            log.debug("[es-index] duplicate ORDER_CREATED event {} - skipped (already fully processed)", eventId);
+            return false;
+        }
+
+        if (items == null || items.isEmpty()) {
+            log.debug("[es-index] ORDER_CREATED event {} has no items - nothing to rank, marking processed", eventId);
+            markProcessed(eventId);
+            return true;
+        }
+
+        for (OrderItemEvent item : items) {
+            if (item.getProductId() == null) {
+                log.warn("[es-index] ORDER_CREATED event {} has an order item with no productId - skipped", eventId);
+                continue;
+            }
+
+            int quantity = item.getQuantity() != null ? item.getQuantity() : 0;
+            if (quantity <= 0) {
+                log.debug("[es-index] ORDER_CREATED event {} item (product {}) has quantity {} - nothing to add",
+                        eventId, item.getProductId(), quantity);
+                continue;
+            }
+
+            String itemKey = orderItemKey(eventId, item.getOrderItemId(), item.getProductId());
+            if (alreadyProcessed(itemKey)) {
+                log.debug("[es-index] ORDER_CREATED event {} item {} already applied - skipped (partial-redelivery case)",
+                        eventId, itemKey);
+                continue;
+            }
+
+            long delta = quantity;
+            Long productId = item.getProductId();
+            withRetry(() -> {
+                productRankingUpdateService.incrementSalesCount(productId, delta);
+                return null;
+            });
+
+            markProcessed(itemKey);
+            log.info("[es-index] applied +{} salesCount to product {} from order item (event {})",
+                    delta, productId, eventId);
+        }
+
+        markProcessed(eventId);
+        return true;
+    }
+
+    // ------------------------------------------------------------------
+    // ORDER_STATUS_CHANGED(-> CANCELLED) -> compensating transaction,
+    // reverses the salesCount increment processOrderCreated applied.
+    // ------------------------------------------------------------------
+
+    /**
+     * Compensates for an order that was counted toward salesCount by
+     * {@link #processOrderCreated} and has now been cancelled: for every
+     * item on the order, atomically subtracts that item's quantity from the
+     * corresponding product's salesCount.
+     * <p>
+     * OrderStatusChangedEvent's payload only carries {@code orderId} and
+     * the before/after status strings - no items/quantities (see
+     * OrderStatusChangedEvent; confirmed by inspection, not assumed). Those
+     * are read straight from Postgres via the existing transactional
+     * {@code OrderRepository} (its {@code findById} already eagerly fetches
+     * {@code items}/{@code items.product} - see its {@code @EntityGraph}),
+     * the same "go to the source of truth rather than trust a thin event
+     * payload" pattern {@link #recomputeReviewAggregate} already uses for
+     * review aggregates.
+     * <p>
+     * Idempotency reuses the exact same two-layer eventId / eventId:item:id
+     * scheme as processOrderCreated, against the SAME es_processed_events
+     * table - but keyed by THIS event's own eventId (the ORDER_STATUS_CHANGED
+     * event's id, distinct from the original ORDER_CREATED event's id), so
+     * there is no collision between an order's "counted" keys and its
+     * "compensated" keys; both sets of keys coexist in the ledger.
+     * <p>
+     * If the order itself cannot be found in Postgres (e.g. truly deleted),
+     * there is nothing to compensate for - logged and marked processed
+     * rather than retried forever, mirroring recomputeReviewAggregate's
+     * "nothing to attach to" handling for a review on an unindexed product.
+     *
+     * @return true if newly (at least partially) processed, false if this
+     * exact compensating event was already fully processed before.
+     */
+    public boolean processOrderCancelled(String eventId, Long orderId, Instant occurredAt) {
+        if (alreadyProcessed(eventId)) {
+            log.debug("[es-index] duplicate ORDER_CANCELLED compensation {} for order {} - skipped", eventId, orderId);
+            return false;
+        }
+
+        Order order = orderRepository.findById(orderId).orElse(null);
+        if (order == null) {
+            log.warn("[es-index] cancelled order {} not found in Postgres (event {}) - nothing to compensate", orderId, eventId);
+            markProcessed(eventId);
+            return true;
+        }
+
+        List<OrderItem> items = order.getItems();
+        if (items == null || items.isEmpty()) {
+            markProcessed(eventId);
+            return true;
+        }
+
+        for (OrderItem item : items) {
+            if (item.getProduct() == null || item.getQuantity() == null || item.getQuantity() <= 0) {
+                continue;
+            }
+
+            Long productId = item.getProduct().getId();
+            long delta = item.getQuantity();
+            String itemKey = orderItemKey(eventId, item.getId(), productId);
+
+            if (alreadyProcessed(itemKey)) {
+                log.debug("[es-index] ORDER_CANCELLED compensation {} item {} already applied - skipped", eventId, itemKey);
+                continue;
+            }
+
+            withRetry(() -> {
+                productRankingUpdateService.decrementSalesCount(productId, delta);
+                return null;
+            });
+
+            markProcessed(itemKey);
+            log.info("[es-index] applied -{} salesCount to product {} compensating cancelled order {} (event {})",
+                    delta, productId, orderId, eventId);
+        }
+
+        markProcessed(eventId);
+        return true;
+    }
+
+    private String orderItemKey(String eventId, Long orderItemId, Long productId) {
+        // orderItemId is the order_items row's own database id - globally unique.
+        // Falling back to productId would be wrong (two distinct order_items rows
+        // for the same product must each get their own key), so a missing
+        // orderItemId is treated as a data problem worth failing loudly on.
+        if (orderItemId == null) {
+            throw new IllegalArgumentException(
+                    "Order item for product " + productId + " has no orderItemId - cannot build a safe idempotency key");
+        }
+        return eventId + ":item:" + orderItemId;
+    }
+
+    // ------------------------------------------------------------------
+    // Product availability (inStock). See ProductRankingUpdateService#setInStock
+    // for why this is a plain set, not a script - and CHANGES.md for the
+    // honest gap this method is intentionally not wired to any live Kafka
+    // event: neither Product nor ProductCreatedEvent/ProductUpdatedEvent
+    // carry any stock/inventory field today, and there is no
+    // INVENTORY_* member on EventType (confirmed by inspection) - inventing
+    // either would be fabricating a field/event the task explicitly said
+    // not to invent.
+    // ------------------------------------------------------------------
+
+    /**
+     * Sets a product's inStock flag, idempotent via the whole-event key only
+     * (per the task's explicit instruction) - unlike salesCount this is not
+     * a counter, so there is no partial-multi-item case to guard against: one
+     * event, one product, one new boolean value.
+     *
+     * @return true if newly processed, false if this eventId was already applied
+     */
+    public boolean processProductAvailability(String eventId, Long productId, boolean inStock) {
+        if (alreadyProcessed(eventId)) {
+            log.debug("[es-index] duplicate availability event {} for product {} - skipped", eventId, productId);
+            return false;
+        }
+
+        withRetry(() -> {
+            productRankingUpdateService.setInStock(productId, inStock);
+            return null;
+        });
+
+        markProcessed(eventId);
+        log.info("[es-index] set inStock={} for product {} (event {})", inStock, productId, eventId);
+        return true;
+    }
+
+    // ------------------------------------------------------------------
     // Idempotency ledger (read-check vs. persist are now two separate
     // steps - see class doc for why this ordering matters)
     // ------------------------------------------------------------------
@@ -296,9 +543,9 @@ public class ProductIndexingService {
                 return action.call();
             } catch (Exception e) {
                 if (!isTransient(e)) {
-                    // Permanent failure (bad request, mapping error, programming bug, ...) -
-                    // retrying cannot help. Fail fast rather than burn 3 attempts on
-                    // something that will never succeed.
+                    // Permanent failure (bad request, mapping error, document missing,
+                    // programming bug, ...) - retrying cannot help. Fail fast rather
+                    // than burn 3 attempts on something that will never succeed.
                     throw (e instanceof RuntimeException re) ? re : new IllegalStateException("Elasticsearch indexing failed", e);
                 }
                 lastError = (e instanceof RuntimeException re) ? re : new IllegalStateException("Elasticsearch indexing failed", e);
@@ -315,7 +562,8 @@ public class ProductIndexingService {
 
     /**
      * Connection-level failures (refused/timeout) are retried; everything else
-     * (including a well-formed 4xx response from Elasticsearch itself) is not.
+     * (including a well-formed 4xx response from Elasticsearch itself, such as
+     * a document-missing error from an order-driven ranking update) is not.
      * This is a best-effort classification based on Spring Data Elasticsearch's
      * documented exception categories (DataAccessResourceFailureException for
      * resource/connection problems) plus walking the cause chain for the

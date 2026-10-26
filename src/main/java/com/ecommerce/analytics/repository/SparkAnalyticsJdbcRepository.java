@@ -56,6 +56,31 @@ public class SparkAnalyticsJdbcRepository {
         return query("SELECT * FROM spark_streaming_revenue ORDER BY window_start DESC LIMIT ?", limit);
     }
 
+    /**
+     * Full contents of the time-decayed popularity table SparkBatchAnalyticsJob
+     * now writes (spark_batch_product_popularity - product_id, popularity_score,
+     * computed_at). No LIMIT: ProductPopularitySyncService needs every row to
+     * push into Elasticsearch, not a "top N" view like the others above.
+     */
+    public SparkQueryResult<Map<String, Object>> productPopularity() {
+        return query("SELECT * FROM spark_batch_product_popularity", null);
+    }
+
+    /**
+     * PHASE 1, item 5 (peak shopping hour summaries): spark_batch_hourly_pattern
+     * (hour_of_day, order_count, revenue) is already computed and written by
+     * BatchAnalytics.hourOfDayPattern()/SparkBatchAnalyticsJob, but nothing
+     * read it back before this. Ordered by hour_of_day ASC (0-23), not by
+     * order_count, and with no LIMIT -- like categoryPerformance() above,
+     * this table only ever has at most 24 rows (one per hour of day), so a
+     * full 0-23 pattern is the useful shape for a "which hours are busiest"
+     * chart, not a truncated top-N that would need re-sorting on the client
+     * to plot in hour order anyway.
+     */
+    public SparkQueryResult<Map<String, Object>> peakShoppingHours() {
+        return query("SELECT * FROM spark_batch_hourly_pattern ORDER BY hour_of_day ASC", null);
+    }
+
     private SparkQueryResult<Map<String, Object>> query(String sql, Integer limit) {
         try {
             List<Map<String, Object>> rows = (limit != null)

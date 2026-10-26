@@ -10,6 +10,8 @@ if [ ! -f target/spark-analytics-1.0.0-all.jar ]; then
 fi
 
 java \
+  -Duser.timezone=UTC \
+  -Dspark.sql.session.timeZone=UTC \
   --add-opens=java.base/java.lang=ALL-UNNAMED \
   --add-opens=java.base/java.lang.invoke=ALL-UNNAMED \
   --add-opens=java.base/java.lang.reflect=ALL-UNNAMED \

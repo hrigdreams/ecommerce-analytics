@@ -1,5 +1,6 @@
 package com.ecommerce.analytics.elasticsearch;
 
+import com.ecommerce.analytics.elasticsearch.config.ElasticsearchIndexProperties;
 import com.ecommerce.analytics.entity.Product;
 import com.ecommerce.analytics.repository.ProductRepository;
 import org.junit.jupiter.api.BeforeEach;
@@ -7,6 +8,9 @@ import org.junit.jupiter.api.Test;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
+import org.springframework.data.elasticsearch.core.ElasticsearchOperations;
+import org.springframework.data.elasticsearch.core.IndexOperations;
+import org.springframework.data.elasticsearch.core.document.Document;
 import org.springframework.data.elasticsearch.core.mapping.IndexCoordinates;
 
 import java.util.List;
@@ -25,13 +29,17 @@ class ProductBackfillServiceTest {
 
     private ProductRepository productRepository;
     private ProductIndexingService productIndexingService;
+    private ElasticsearchOperations elasticsearchOperations;
+    private ElasticsearchIndexProperties indexProperties;
     private ProductBackfillService service;
 
     @BeforeEach
     void setUp() {
         productRepository = mock(ProductRepository.class);
         productIndexingService = mock(ProductIndexingService.class);
-        service = new ProductBackfillService(productRepository, productIndexingService);
+        elasticsearchOperations = mock(ElasticsearchOperations.class);
+        indexProperties = new ElasticsearchIndexProperties();
+        service = new ProductBackfillService(productRepository, productIndexingService, elasticsearchOperations, indexProperties);
     }
 
     private Product product(long id, String name) {
@@ -115,5 +123,84 @@ class ProductBackfillServiceTest {
                 });
 
         service.run(); // outer call completes normally after the inner assertion passes
+    }
+
+    // ------------------------------------------------------------------
+    // PHASE 3A: wipeAndResync()
+    // ------------------------------------------------------------------
+
+    @Test
+    void wipeAndResync_shouldDeleteRecreateAndAliasTheIndex_thenResyncFromPostgres() {
+        IndexOperations liveIndexOps = mock(IndexOperations.class);
+        IndexOperations documentIndexOps = mock(IndexOperations.class);
+        IndexCoordinates expectedCoordinates = IndexCoordinates.of(indexProperties.getProductsIndexName());
+
+        when(elasticsearchOperations.indexOps(expectedCoordinates)).thenReturn(liveIndexOps);
+        when(elasticsearchOperations.indexOps(com.ecommerce.analytics.elasticsearch.document.ProductDocument.class))
+                .thenReturn(documentIndexOps);
+        when(documentIndexOps.createMapping(com.ecommerce.analytics.elasticsearch.document.ProductDocument.class))
+                .thenReturn(Document.create());
+        when(liveIndexOps.exists()).thenReturn(true);
+
+        Pageable page0 = PageRequest.of(0, 500);
+        List<Product> content = List.of(product(1L, "A"));
+        when(productRepository.findAll(page0)).thenReturn(new PageImpl<>(content, page0, 1));
+        when(productIndexingService.upsertProduct(anyString(), any(), any(), any(), any(), any())).thenReturn(true);
+
+        ProductBackfillService.BackfillResult result = service.wipeAndResync();
+
+        // Wipe sequence, in order: delete the existing index, recreate it,
+        // apply ProductDocument's mapping, then re-add the alias.
+        verify(liveIndexOps).delete();
+        verify(liveIndexOps).create();
+        verify(liveIndexOps).putMapping(any(Document.class));
+        verify(liveIndexOps).alias(any());
+
+        // Then the normal paged resync runs against the (now-clean) alias.
+        assertEquals(1, result.productsIndexed());
+        assertEquals("products", result.targetIndex());
+    }
+
+    @Test
+    void wipeAndResync_whenIndexDoesNotExistYet_shouldSkipDeleteButStillCreateAndResync() {
+        IndexOperations liveIndexOps = mock(IndexOperations.class);
+        IndexOperations documentIndexOps = mock(IndexOperations.class);
+        IndexCoordinates expectedCoordinates = IndexCoordinates.of(indexProperties.getProductsIndexName());
+
+        when(elasticsearchOperations.indexOps(expectedCoordinates)).thenReturn(liveIndexOps);
+        when(elasticsearchOperations.indexOps(com.ecommerce.analytics.elasticsearch.document.ProductDocument.class))
+                .thenReturn(documentIndexOps);
+        when(documentIndexOps.createMapping(com.ecommerce.analytics.elasticsearch.document.ProductDocument.class))
+                .thenReturn(Document.create());
+        when(liveIndexOps.exists()).thenReturn(false);
+
+        Pageable page0 = PageRequest.of(0, 500);
+        when(productRepository.findAll(page0)).thenReturn(new PageImpl<>(List.of(), page0, 0));
+
+        service.wipeAndResync();
+
+        verify(liveIndexOps, never()).delete();
+        verify(liveIndexOps).create();
+    }
+
+    @Test
+    void wipeAndResync_shouldRejectAConcurrentSecondCall() {
+        IndexOperations liveIndexOps = mock(IndexOperations.class);
+        IndexOperations documentIndexOps = mock(IndexOperations.class);
+        when(elasticsearchOperations.indexOps(any(IndexCoordinates.class))).thenReturn(liveIndexOps);
+        when(elasticsearchOperations.indexOps(com.ecommerce.analytics.elasticsearch.document.ProductDocument.class))
+                .thenReturn(documentIndexOps);
+        when(documentIndexOps.createMapping(com.ecommerce.analytics.elasticsearch.document.ProductDocument.class))
+                .thenReturn(Document.create());
+        when(liveIndexOps.exists()).thenReturn(false);
+
+        when(productRepository.findAll(any(Pageable.class)))
+                .thenAnswer(invocation -> {
+                    assertThrows(IllegalStateException.class, () -> service.wipeAndResync());
+                    assertThrows(IllegalStateException.class, service::run);
+                    return new PageImpl<>(List.of(), PageRequest.of(0, 500), 0);
+                });
+
+        service.wipeAndResync();
     }
 }

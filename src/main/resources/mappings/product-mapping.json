@@ -1,0 +1,52 @@
+{
+  "properties": {
+    "id": {
+      "type": "long"
+    },
+    "name": {
+      "type": "text",
+      "analyzer": "standard",
+      "fields": {
+        "keyword": {
+          "type": "keyword"
+        }
+      }
+    },
+    "price": {
+      "type": "double"
+    },
+    "categoryId": {
+      "type": "long"
+    },
+    "categoryName": {
+      "type": "keyword"
+    },
+    "averageRating": {
+      "type": "double"
+    },
+    "reviewCount": {
+      "type": "integer"
+    },
+    "salesCount": {
+      "type": "long"
+    },
+    "popularityScore": {
+      "type": "double"
+    },
+    "inStock": {
+      "type": "boolean"
+    },
+    "createdAt": {
+      "type": "date"
+    },
+    "lastEventOccurredAt": {
+      "type": "date"
+    },
+    "lastEventId": {
+      "type": "keyword"
+    },
+    "updatedAt": {
+      "type": "date"
+    }
+  }
+}

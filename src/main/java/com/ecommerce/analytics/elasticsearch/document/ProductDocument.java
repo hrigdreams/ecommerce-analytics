@@ -5,36 +5,27 @@ import org.springframework.data.elasticsearch.annotations.Document;
 import org.springframework.data.elasticsearch.annotations.Field;
 import org.springframework.data.elasticsearch.annotations.FieldType;
 import org.springframework.data.elasticsearch.annotations.InnerField;
+import org.springframework.data.elasticsearch.annotations.Mapping;
 import org.springframework.data.elasticsearch.annotations.MultiField;
 
 import java.time.Instant;
 
 /**
  * Search document for one product. Indexed into the "products" ALIAS (which
- * points at a versioned index, e.g. products-v1 - see
- * ElasticsearchIndexInitializer for why: it lets a future reindex create
- * products-v2, verify it, then swap the alias with zero downtime, instead
- * of ever dropping/recreating a live index in place).
- *
- * Field choices are driven by the actual Product/Category/Review entities
- * (see PRODUCT_CREATED/UPDATED/DELETED and REVIEW_* event payloads) and the
- * one real use case this phase implements: product search with text +
- * category + price + rating filtering. Nothing here models a field "because
- * Postgres has it" - e.g. there is no raw `description` field because
- * Product has none.
+ * points at a versioned index, e.g. products-v1
  */
 @Document(
         indexName = "#{@elasticsearchIndexProperties.productsAlias}",
         createIndex = false
 )
+@Mapping(mappingPath = "mappings/product-mapping.json")
 public class ProductDocument {
 
     /**
      * Deterministic document ID = the product's own database id. Re-indexing
      * the same product (duplicate event delivery, or a later update) always
      * targets the exact same document - never creates a duplicate. This is
-     * the core of this design's idempotency story, independent of anything
-     * event-specific.
+     * the core of this design's idempotency story.
      */
     @Id
     private Long id;
@@ -42,8 +33,7 @@ public class ProductDocument {
     /**
      * "text" (analyzed, for free-text relevance matching) with a "keyword"
      * sub-field (name.keyword, exact-match, used for sorting/aggregating by
-     * exact name) - the standard Elasticsearch pattern for a field that
-     * needs both.
+     * exact name)
      */
     @MultiField(
             mainField = @Field(type = FieldType.Text, name = "name"),
@@ -63,9 +53,7 @@ public class ProductDocument {
      * ProductUpdatedEvent only carry categoryId, not the name) - looked up
      * once via CategoryRepository when the event is handled. Known
      * limitation: if a category is later renamed, already-indexed products
-     * keep the old name until that product is next updated or reindexed -
-     * see README/limitations. Keyword, not text: used for exact-match
-     * filtering and faceting, not free-text search.
+     * keep the old name until that product is next updated or reindexed.
      */
     @Field(type = FieldType.Keyword)
     private String categoryName;
@@ -78,10 +66,8 @@ public class ProductDocument {
     private Integer reviewCount;
 
     // ------------------------------------------------------------------------
-    // NEW BUSINESS RANKING FIELDS
-    // These fields are populated asynchronously by analytics/Spark jobs via
-    // Partial Updates, completely bypassing the PostgreSQL core database.
-    // Default values ensure backward compatibility with older documents.
+    // BUSINESS RANKING FIELDS
+    // salesCount is updated by atomic Painless +=/-= scripts
     // ------------------------------------------------------------------------
 
     @Field(type = FieldType.Long)
@@ -99,13 +85,10 @@ public class ProductDocument {
     // ------------------------------------------------------------------------
 
     /**
-     * Ordering/staleness guard (see ProductIndexingService): an incoming
+     * Ordering/staleness guard, an incoming
      * event only overwrites this document if its occurredAt is strictly
      * after this value, OR equal AND its eventId wins the tie-break (see
-     * lastEventId). EventEnvelope#version is NOT used for this - inspection
-     * of EventEnvelopeFactory confirmed it is hard-coded to 1 on every
-     * event, so it carries no ordering information; occurredAt is the only
-     * field the actual event model supports for this purpose.
+     * lastEventId).
      */
     @Field(type = FieldType.Date)
     private Instant lastEventOccurredAt;
@@ -149,7 +132,6 @@ public class ProductDocument {
     public Integer getReviewCount() { return reviewCount; }
     public void setReviewCount(Integer reviewCount) { this.reviewCount = reviewCount; }
 
-    // --- New Ranking Getters & Setters ---
     public Long getSalesCount() { return salesCount; }
     public void setSalesCount(Long salesCount) { this.salesCount = salesCount; }
 
@@ -161,7 +143,6 @@ public class ProductDocument {
 
     public Instant getCreatedAt() { return createdAt; }
     public void setCreatedAt(Instant createdAt) { this.createdAt = createdAt; }
-    // -------------------------------------
 
     public Instant getLastEventOccurredAt() { return lastEventOccurredAt; }
     public void setLastEventOccurredAt(Instant lastEventOccurredAt) { this.lastEventOccurredAt = lastEventOccurredAt; }

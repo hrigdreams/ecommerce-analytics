@@ -14,6 +14,14 @@ import java.time.Instant;
  * autoStart=false) — it only ever runs when explicitly turned on, either by
  * setting app.simulator.enabled=true + app.simulator.auto-start=true, or by
  * calling POST /api/v1/simulator/start once enabled=true.
+ *
+ * PHASE 1, item 3 (continuous pulse mode): added the nested {@link Pulse}
+ * properties below (app.simulator.pulse.*). These are additive to every
+ * property already here -- the original burst/unbounded start/stop mode
+ * (iterations, intervalMs, seed, ...) is completely unchanged and still
+ * works exactly as before. Pulse mode is a second, independent way to run
+ * the same simulator, controlled separately via
+ * POST /api/v1/simulator/pulse/start and /pulse/stop.
  */
 
 
@@ -51,6 +59,9 @@ public class SimulatorProperties {
      */
     private Instant historicalCutoff;
 
+    /** PHASE 1, item 3: continuous "pulse" mode settings (app.simulator.pulse.*). */
+    private Pulse pulse = new Pulse();
+
     public boolean isEnabled() { return enabled; }
     public void setEnabled(boolean enabled) { this.enabled = enabled; }
 
@@ -77,4 +88,35 @@ public class SimulatorProperties {
 
     public Instant getHistoricalCutoff() { return historicalCutoff; }
     public void setHistoricalCutoff(Instant historicalCutoff) { this.historicalCutoff = historicalCutoff; }
+
+    public Pulse getPulse() { return pulse; }
+    public void setPulse(Pulse pulse) { this.pulse = pulse; }
+
+    /**
+     * PHASE 1, item 3. Binds app.simulator.pulse.interval-ms,
+     * app.simulator.pulse.min-events-per-tick, app.simulator.pulse.max-events-per-tick
+     * via Spring Boot's standard relaxed binding for nested
+     * {@code @ConfigurationProperties} objects -- no extra annotation needed
+     * beyond the enclosing class's own {@code @ConfigurationProperties}.
+     */
+    public static class Pulse {
+
+        /** Delay between scheduled pulse ticks, in milliseconds. Default 12000 (12s, the midpoint of the requested 10-15s range). */
+        private long intervalMs = 12000;
+
+        /** Minimum number of simulated actions run on each tick. */
+        private int minEventsPerTick = 2;
+
+        /** Maximum number of simulated actions run on each tick (inclusive). */
+        private int maxEventsPerTick = 5;
+
+        public long getIntervalMs() { return intervalMs; }
+        public void setIntervalMs(long intervalMs) { this.intervalMs = intervalMs; }
+
+        public int getMinEventsPerTick() { return minEventsPerTick; }
+        public void setMinEventsPerTick(int minEventsPerTick) { this.minEventsPerTick = minEventsPerTick; }
+
+        public int getMaxEventsPerTick() { return maxEventsPerTick; }
+        public void setMaxEventsPerTick(int maxEventsPerTick) { this.maxEventsPerTick = maxEventsPerTick; }
+    }
 }

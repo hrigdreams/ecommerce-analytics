@@ -90,7 +90,7 @@ public class ProductService {
             domainEventPublisher.publish(event);
         }
 
-        return mapToResponse(saved);
+        return ProductResponse.fromEntity(saved);
     }
 
     @Transactional
@@ -142,7 +142,7 @@ public class ProductService {
             domainEventPublisher.publish(event);
         }
 
-        return mapToResponse(saved);
+        return ProductResponse.fromEntity(saved);
     }
 
     @Transactional
@@ -194,7 +194,7 @@ public class ProductService {
                         )
                 );
 
-        return mapToResponse(product);
+        return ProductResponse.fromEntity(product);
     }
 
     @Transactional(readOnly = true)
@@ -202,32 +202,18 @@ public class ProductService {
 
         return productRepository.findAll()
                 .stream()
-                .map(this::mapToResponse)
+                .map(ProductResponse::fromEntity)
                 .toList();
     }
 
     /** Paginated variant used by the /api/v1/products list endpoint. */
     @Transactional(readOnly = true)
     public Page<ProductResponse> getAllProducts(Pageable pageable) {
-        return productRepository.findAll(pageable).map(this::mapToResponse);
+        return productRepository.findAll(pageable).map(ProductResponse::fromEntity);
     }
 
-    private ProductResponse mapToResponse(Product product) {
-
-        ProductResponse response = new ProductResponse();
-
-        response.setId(product.getId());
-        response.setName(product.getName());
-        response.setPrice(product.getPrice());
-
-        if (product.getCategory() != null) {
-            response.setCategoryId(
-                    product.getCategory().getId()
-            );
-        } else {
-            response.setCategoryId(null);
-        }
-
-        return response;
-    }
+    // mapToResponse(Product) was removed - ProductResponse.fromEntity(product)
+    // now owns this mapping (see that method's doc for why it lives on the
+    // DTO rather than here). Every call site above was updated to call it
+    // directly; no behavior changed, this is a pure refactor.
 }
